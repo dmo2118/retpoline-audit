@@ -1,4 +1,4 @@
-CXXFLAGS=-Wall -g
+CXXFLAGS=-Wall -g -std=c++11
 
 OBJ=retpoline-audit.o
 LDLIBS=-lbfd -lopcodes

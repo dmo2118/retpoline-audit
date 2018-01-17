@@ -1,3 +1,6 @@
+/* -*- mode: c; tab-width: 4; fill-column: 128 -*- */
+/* vi: set ts=4 tw=128: */
+
 #include <bfd.h>
 #include <getopt.h>
 #include <dis-asm.h>
@@ -7,8 +10,11 @@
 #include <cstdlib>
 #include <cstdarg>
 #include <cstring>
+#include <sys/wait.h>
 #include <type_traits>
+#include <unistd.h>
 #include <unordered_set>
+#include <vector>
 
 namespace // Lots of little functions and classes, too small to warrant their own header files.
 {
@@ -20,8 +26,8 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 	template<typename T> inline void _verify(T x)
 	{
 	#ifndef NDEBUG
-	if(!x)
-		abort();
+		if(!x)
+			abort();
 	#endif
 	}
 
@@ -59,34 +65,19 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 		template<typename T> T *get() const
 		{
-			static_assert(std::is_pod<T>::value);
+			static_assert(std::is_pod<T>::value, "_malloc_ptr can only contain POD types");
 			return static_cast<T *>(_ptr);
 		}
-	};
 
-	/*
-	class _stdio_stream
-	{
-	private:
-		FILE *_stream;
-
-	public:
-		_stdio_stream(FILE *stream): _stream(stream)
+		void resize(size_t new_size)
 		{
-		}
-
-		~_stdio_stream()
-		{
-		}
-
-		FILE *get() const
-		{
-			return _stream;
+			void *new_ptr = realloc(_ptr, new_size);
+			if(!new_ptr) // POSIX guarantees that errno is set, but C (and C++) does not.
+				throw std::bad_alloc();
+			_ptr = new_ptr;
 		}
 	};
-	*/
 
-	/*
 	class _errno_exception: public std::exception
 	{
 	private:
@@ -99,10 +90,23 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 		const char *what() const throw()
 		{
-			return strerror(_error);
+			return strerror(_error); // Not thread-safe, but we're not multithreaded.
 		}
+
+		template<typename T> static T check(T result) // There's a few different int types in use here.
+		{
+			if(result < 0)
+				throw_exception();
+			return result;
+		}
+
+		[[noreturn]] static void throw_exception(int error = errno);
 	};
-	*/
+
+	[[noreturn]] void _errno_exception::throw_exception(int error)
+	{
+		throw _errno_exception(error);
+	}
 
 	class _static_string_exception: public std::exception
 	{
@@ -117,6 +121,27 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		const char *what() const throw()
 		{
 			return _what;
+		}
+	};
+
+	class _file
+	{
+	private:
+		int _fd;
+
+	public:
+		explicit _file(int fd): _fd(fd)
+		{
+		}
+
+		~_file()
+		{
+			close(_fd);
+		}
+
+		operator int() const
+		{
+			return _fd;
 		}
 	};
 
@@ -192,34 +217,21 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		throw _bfd::exception(error);
 	}
 
-	const char *_program_name;
-
-	static void _print_help()
+	static void _print_help(const char *program_name)
 	{
 		fputs("Usage: ", stdout);
-		fputs(_program_name, stdout);
+		fputs(program_name, stdout);
 		fputs(" [--help] [--version] [-n max_errors] [file...]\n", stdout);
 	}
 
-	void _prefix(char **argv, bool warning)
+	// TODO: Replace this with a printf-like, and destroy all (f)put(s|c|char).
+	void _prefix(const char *text, bool warning = false)
 	{
-		fputs(*argv, stderr);
+		fputs(text, stderr);
 		fputs(": ", stderr);
 		if(warning)
 			fputs("warning: ", stderr);
 
-	}
-
-	void _warn(char **argv, const char *msg, bool warning = true)
-	{
-		_prefix(argv, warning);
-		fputs(msg, stderr);
-		fputc('\n', stderr);
-	}
-
-	void _error(char **argv, const char *msg)
-	{
-		_warn(argv, msg, false);
 	}
 
 	struct _insn_str
@@ -256,18 +268,22 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 	}
 
 	bool _found_indirect(
-		char **argv,
+		const char *path,
 		const asection *section,
 		bfd_vma vma,
 		unsigned long &error_count,
 		unsigned long max_errors)
 	{
+		// TODO: Redo all this business.
 		if(!max_errors)
-			throw _static_string_exception("indirect branch found");
+		{
+			++error_count;
+			return false;
+		}
 
 		if(error_count == max_errors)
 		{
-			_prefix(argv, false);
+			_prefix(path);
 			fputs("maximum error count reached for section ", stderr);
 			fputs(section->name, stderr);
 			fputc('\n', stderr);
@@ -276,7 +292,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 		// TODO: Handle max_errors == 0
 
-		_prefix(argv, false);
+		_prefix(path);
 		fprintf(
 			stderr,
 			"indirect branch at %s:0x%.8llx\n",
@@ -289,12 +305,272 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 		return true;
 	}
+
+	bool _audit(
+		disassemble_info &dinfo,
+		unsigned long max_errors,
+		const char *path,
+		std::unordered_set<std::string> &pending,
+		std::vector<const char *> &todo)
+	{
+		try
+		{
+			bool result = true;
+
+			{
+				_bfd abfd(path);
+
+				_bfd::check(bfd_check_format(abfd, bfd_object));
+
+				bfd_architecture arch = bfd_get_arch(abfd);
+				unsigned long mach = bfd_get_mach(abfd);
+
+				if(arch != bfd_arch_i386)
+					_unsupported_insn();
+
+				if(!(mach & (bfd_mach_x86_64 | bfd_mach_i386_i386)))
+					_unsupported_insn();
+
+				disassembler_ftype dis_asm = disassembler(abfd);
+				assert(dis_asm);
+				// Stolen from objdump(1).
+				dinfo.flavour = bfd_get_flavour(abfd);
+				dinfo.arch = bfd_get_arch(abfd);
+				dinfo.mach = bfd_get_mach(abfd);
+				dinfo.octets_per_byte = bfd_octets_per_byte(abfd);
+
+				// printf("flags: %x %d\n", abfd->flags, abfd->flags & EXEC_P);
+				// printf("start: %lx\n", abfd->start_address);
+
+				for(asection *section = abfd->sections; section != nullptr; section = section->next)
+				{
+					unsigned long error_count = 0;
+
+					if(section->flags & SEC_CODE)
+					{
+						/*
+						printf(
+							"section: %s @ %lx -> %lx (%lx) flags = %x\n",
+							section->name,
+							section->filepos,
+							section->vma,
+							section->size,
+							section->flags);
+						*/
+
+						_malloc_ptr section_data(
+							[&, section](void *&ptr)
+							{
+								_bfd::check(bfd_malloc_and_get_section(abfd, section, reinterpret_cast<bfd_byte **>(&ptr)));
+							});
+
+						dinfo.buffer = section_data.get<bfd_byte>();
+						dinfo.buffer_vma = section->vma;
+						dinfo.buffer_length = section->size;
+						dinfo.section = section;
+
+						bfd_vma vma = section->vma;
+						bfd_vma vma_end = vma + section->size;
+						while(vma < vma_end)
+						{
+							int bytes = dis_asm(vma, &dinfo);
+							if(bytes < 0)
+								break;
+							// printf("  %*s\n", (int)insn_str.size, insn_str.buf);
+
+							if(arch == bfd_arch_i386)
+							{
+								bfd_byte *ptr = section_data.get<bfd_byte>() + (vma - section->vma);
+
+								unsigned remaining = bytes;
+								// Prefixes: SEG=(CS|DS|ES|FS|GS|SS), operand/address size, LOCK, REP*, REX.* (only 64-bit)
+								while(
+									remaining &&
+									(*ptr == 0x26 || *ptr == 0x36 || *ptr == 0x2e || *ptr == 0x3e ||
+									 *ptr == 0x64 || *ptr == 0x65 || *ptr == 0x66 || *ptr == 0x67 ||
+									 *ptr == 0xf0 || *ptr == 0xf2 || *ptr == 0xf3 ||
+									((mach & bfd_mach_x86_64) && ((*ptr & 0xf0) == 0x40))))
+								{
+									++ptr;
+									--remaining;
+								}
+
+								if(remaining >= 2 && ptr[0] == 0xff)
+								{
+									bfd_byte modrm543 = ptr[1] & 0x38;
+									if(modrm543 == 0x10 || modrm543 == 0x18 || modrm543 == 0x20 || modrm543 == 0x28)
+									{
+										if(!_found_indirect(path, section, vma, error_count, max_errors))
+											break;
+									}
+								}
+							}
+
+							vma += bytes;
+						}
+					}
+
+					if(error_count)
+						result = false;
+				}
+
+				if(!result && !max_errors)
+				{
+					_prefix(path);
+					fputs("indirect branch found\n", stderr);
+				}
+			} // Close the BFD.
+
+			// TODO: re-check error handling for -n0, -n1, -n4.
+
+			// Using ldd(1) to find dependencies. The second-best alternative is probably to run through the search order
+			// mentioned in Linux's ld.so man page, but that doesn't cover stuff like the /usr/lib/x86_64-linux-gnu path on
+			// Debian.
+			int pipefd[2];
+			_errno_exception::check(pipe(pipefd));
+			_file pipe_read(pipefd[0]);
+
+			pid_t child_pid;
+
+			{
+				_file pipe_write(pipefd[1]);
+				child_pid = _errno_exception::check(fork());
+				if(!child_pid)
+				{
+					if(dup2(pipe_write, 1) >= 0)
+						execlp("ldd", "ldd", path, NULL);
+
+					int error = errno;
+					_prefix(path);
+					fputs("couldn't execute ldd: ", stderr);
+					fputs(strerror(error), stderr);
+					fputc('\n', stderr);
+					fflush(stderr);
+
+					_exit(EXIT_FAILURE);
+				}
+			} // Close pipe_write.
+
+			_malloc_ptr ldd_output; // std::vector would zero out its memory, and this doesn't need that.
+			size_t ldd_output_size = 0, ldd_output_capacity = 0;
+			for(;;)
+			{
+				if(ldd_output_size == ldd_output_capacity)
+				{
+					ldd_output_capacity *= 2;
+					if(!ldd_output_capacity)
+						ldd_output_capacity = 4;
+					ldd_output.resize(ldd_output_capacity);
+				}
+				ssize_t size = _errno_exception::check(read(pipe_read, ldd_output.get<char>() + ldd_output_size, ldd_output_capacity - ldd_output_size));
+				if(!size)
+					break;
+				ldd_output_size += size;
+			}
+
+			int status;
+			_errno_exception::check(waitpid(child_pid, &status, 0));
+			if(!status)
+				result = false;
+
+			if(ldd_output_size == ldd_output_capacity)
+				ldd_output.resize(ldd_output_size + 1);
+
+			// Manual, destructive string parsing; POSIX regex apparently doesn't do non-greedy/minimal matching. And PCRE is
+			// overkill just for this.
+			// Parsing breaks down for libraries with " => " in the name.
+			// TODO: VDSO.
+			char *p = ldd_output.get<char>();
+			char *end = p + ldd_output_size;
+			*end = 0;
+			while(p != end)
+			{
+				char *eol = strchr(p, '\n');
+				if(!eol)
+					eol = end;
+				*eol = 0;
+
+				if(*p == '\t')
+					++p;
+
+				if(strcmp(p, "statically linked"))
+				{
+					const char *arrow = strstr(p, " => ");
+					if(arrow)
+						arrow += 4;
+					else
+						arrow = p; // Shared object is using an absolute path.
+
+					if(arrow != eol && eol[-1] == ')')
+					{
+						bool got_paren;
+						char *paren = eol - 1;
+						if(paren != arrow)
+						{
+							--paren;
+							while(paren != arrow)
+							{
+								if(paren[0] == ' ' && paren[1] == '(')
+								{
+									got_paren = true;
+									break;
+								}
+
+								--paren;
+							}
+						}
+
+						if(!got_paren)
+						{
+							_prefix(path);
+							fputs(p, stderr);
+							fputc('\n', stderr);
+							result = false;
+						}
+						else
+						{
+							*paren = 0;
+							if(strcmp("linux-vdso.so.1", arrow))
+							{
+								std::pair<std::unordered_set<std::string>::iterator, bool> result =
+									pending.insert(std::string(arrow, paren - arrow));
+								if(result.second)
+									todo.push_back(result.first->c_str());
+							}
+						}
+					}
+					else
+					{
+						// Expecting a 'not found' here.
+						_prefix(path);
+						fputs(p, stderr);
+						fputc('\n', stderr);
+						result = false;
+					}
+				}
+
+				p = eol;
+				if(p == end)
+					break;
+				++p;
+			}
+
+			return result;
+		}
+		catch(const std::exception &exc)
+		{
+			_prefix(path);
+			fputs(exc.what(), stderr);
+			fputc('\n', stderr);
+		}
+
+		return false;
+	}
 }
 
 int main(int argc, char **argv)
 {
-	_program_name = argv[0];
-
+	const char *program_name = argv[0];
 	unsigned long max_errors = 4;
 
 	for(;;)
@@ -313,7 +589,7 @@ int main(int argc, char **argv)
 		switch(optc)
 		{
 		case 'h':
-			_print_help();
+			_print_help(program_name);
 			return EXIT_SUCCESS;
 
 		case 'n':
@@ -321,7 +597,7 @@ int main(int argc, char **argv)
 			max_errors = strtoul(optarg, &end, 0);
 			if(*end)
 			{
-				_print_help();
+				_print_help(program_name);
 				return EXIT_FAILURE;
 			}
 			break;
@@ -355,7 +631,7 @@ int main(int argc, char **argv)
 	argv += optind;
 	if(*argv == nullptr)
 	{
-		_print_help();
+		_print_help(program_name);
 		return EXIT_FAILURE;
 	}
 
@@ -366,147 +642,25 @@ int main(int argc, char **argv)
 
 	int result = EXIT_SUCCESS;
 
+	// A custom string_set class could combine a hash table node with string data in the same block of memory, saving one
+	// allocation per string. Or I could do things the easy way.
+	std::unordered_set<std::string> pending;
+	std::vector<const char *> todo;
+
 	do
 	{
-		try
-		{
-			_bfd abfd(*argv);
-
-			_bfd::check(bfd_check_format(abfd, bfd_object));
-
-			bfd_architecture arch = bfd_get_arch(abfd);
-			unsigned long mach = bfd_get_mach(abfd);
-
-			if(arch != bfd_arch_i386)
-				_unsupported_insn();
-
-			if(!(mach & (bfd_mach_x86_64 | bfd_mach_i386_i386)))
-				_unsupported_insn();
-
-			disassembler_ftype dis_asm = disassembler(abfd);
-			assert(dis_asm);
-			// Stolen from objdump(1).
-			dinfo.flavour = bfd_get_flavour(abfd);
-			dinfo.arch = bfd_get_arch(abfd);
-			dinfo.mach = bfd_get_mach(abfd);
-			dinfo.octets_per_byte = bfd_octets_per_byte(abfd);
-
-			/*
-			std::unordered_set<bfd_vma> pending_vmas;
-			assert(abfd->start_address);
-			pending_vmas.insert(abfd->start_address);
-			*/
-
-			/*
-			try
-			{
-				int symcount;
-				unsigned minisym_size;
-				_malloc_ptr minisyms(
-					[&](void *&ptr)
-					{
-						symcount = bfd_read_minisymbols(abfd, true, &ptr, &minisym_size);
-						_bfd::check(symcount >= 0);
-					});
-				asymbol *symbol = bfd_make_empty_symbol(abfd);
-				const char *minisym = minisyms.get<const char>();
-				const void *minisyms_end = minisym + symcount * minisym_size;
-				for(; minisym != minisyms_end; minisym += minisym_size)
-				{
-					asymbol *sym0 = _bfd::check(bfd_minisymbol_to_symbol(abfd, true, minisym, symbol));
-					printf("  %s\n", sym0->name);
-				}
-			}
-			catch(_bfd::exception exc)
-			{
-				if(exc.error() != bfd_error_no_symbols)
-					throw;
-			}
-			*/
-
-			// printf("flags: %x %d\n", abfd->flags, abfd->flags & EXEC_P);
-			// printf("start: %lx\n", abfd->start_address);
-
-			for(asection *section = abfd->sections; section != nullptr; section = section->next)
-			{
-				unsigned long error_count = 0;
-
-				if(section->flags & SEC_CODE)
-				{
-					/*
-					printf(
-						"section: %s @ %lx -> %lx (%lx) flags = %x\n",
-						section->name,
-						section->filepos,
-						section->vma,
-						section->size,
-						section->flags);
-					*/
-
-					_malloc_ptr section_data(
-						[&, section](void *&ptr)
-						{
-							_bfd::check(bfd_malloc_and_get_section(abfd, section, reinterpret_cast<bfd_byte **>(&ptr)));
-						});
-
-					dinfo.buffer = section_data.get<bfd_byte>();
-					dinfo.buffer_vma = section->vma;
-					dinfo.buffer_length = section->size;
-					dinfo.section = section;
-
-					bfd_vma vma = section->vma;
-					bfd_vma vma_end = vma + section->size;
-					while(vma < vma_end)
-					{
-						int bytes = dis_asm(vma, &dinfo);
-						if(bytes < 0)
-							break;
-						// printf("  %*s\n", (int)insn_str.size, insn_str.buf);
-
-						if(arch == bfd_arch_i386)
-						{
-							bfd_byte *ptr = section_data.get<bfd_byte>() + (vma - section->vma);
-
-							unsigned remaining = bytes;
-							// Prefixes: SEG=(CS|DS|ES|FS|GS|SS), operand/address size, LOCK, REP*, REX.* (only 64-bit)
-							while(
-								remaining &&
-								(*ptr == 0x26 || *ptr == 0x36 || *ptr == 0x2e || *ptr == 0x3e ||
-								 *ptr == 0x64 || *ptr == 0x65 || *ptr == 0x66 || *ptr == 0x67 ||
-								 *ptr == 0xf0 || *ptr == 0xf2 || *ptr == 0xf3 ||
-								((mach & bfd_mach_x86_64) && ((*ptr & 0xf0) == 0x40))))
-							{
-								++ptr;
-								--remaining;
-							}
-
-							if(remaining >= 2 && ptr[0] == 0xff)
-							{
-								bfd_byte modrm543 = ptr[1] & 0x38;
-								if(modrm543 == 0x10 || modrm543 == 0x18 || modrm543 == 0x20 || modrm543 == 0x28)
-								{
-									if(!_found_indirect(argv, section, vma, error_count, max_errors))
-										break;
-								}
-							}
-						}
-
-						vma += bytes;
-					}
-				}
-
-				if(error_count)
-					result = EXIT_FAILURE;
-			}
-		}
-		catch(const std::exception &exc)
-		{
-			_error(argv, exc.what());
+		if(!_audit(dinfo, max_errors, *argv, pending, todo))
 			result = EXIT_FAILURE;
-		}
-
 		++argv;
 	} while(*argv);
+
+	while(!todo.empty())
+	{
+		const char *path = todo.back();
+		todo.pop_back();
+		if(!_audit(dinfo, max_errors, path, pending, todo))
+			result = EXIT_FAILURE;
+	}
 
 	return result;
 }
