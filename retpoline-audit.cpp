@@ -2,7 +2,6 @@
 /* vi: set ts=4 tw=128: */
 
 #include <bfd.h>
-#include <getopt.h>
 #include <dis-asm.h>
 
 #include <cassert>
@@ -219,19 +218,30 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 	static void _print_help(const char *program_name)
 	{
-		fputs("Usage: ", stdout);
-		fputs(program_name, stdout);
-		fputs(" [--help] [--version] [-n max_errors] [file...]\n", stdout);
+		printf("Usage: %s [-h] [-V] [-n max_branches] [-x] [files...]\n", program_name);
 	}
 
-	// TODO: Replace this with a printf-like, and destroy all (f)put(s|c|char).
-	void _prefix(const char *text, bool warning = false)
+	void _prefix(const char *text)
 	{
 		fputs(text, stderr);
 		fputs(": ", stderr);
-		if(warning)
-			fputs("warning: ", stderr);
+	}
 
+	void _error(const char *prefix, const char *message)
+	{
+		_prefix(prefix);
+		fputs(message, stderr);
+		fputc('\n', stderr);
+	}
+
+	void _errorf(const char *prefix, const char *format, ...)
+	{
+		_prefix(prefix);
+		va_list ap;
+		va_start(ap, format);
+		vfprintf(stderr, format, ap);
+		va_end(ap);
+		fputc('\n', stderr);
 	}
 
 	struct _insn_str
@@ -239,23 +249,6 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		char buf[40];
 		size_t size;
 	};
-
-	/*
-	int _print_insn(void *str_raw, const char *fmt, ...)
-	{
-		_insn_str &str = *static_cast<_insn_str *>(str_raw);
-
-		va_list ap;
-		va_start(ap, fmt);
-		int result = vsnprintf(str.buf + str.size, _arraysize(str.buf) - str.size, fmt, ap);
-		va_end(ap);
-
-		if(result < 0)
-			return 0;
-		str.size += result;
-		return result;
-	}
-	*/
 
 	int _print_nothing(void *, const char *, ...)
 	{
@@ -272,37 +265,17 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		const asection *section,
 		bfd_vma vma,
 		unsigned long &error_count,
-		unsigned long max_errors)
+		unsigned long max_errors,
+		std::vector<const char *> &bad_sections)
 	{
-		// TODO: Redo all this business.
-		if(!max_errors)
-		{
-			++error_count;
-			return false;
-		}
-
-		if(error_count == max_errors)
-		{
-			_prefix(path);
-			fputs("maximum error count reached for section ", stderr);
-			fputs(section->name, stderr);
-			fputc('\n', stderr);
-			return false;
-		}
-
-		// TODO: Handle max_errors == 0
-
-		_prefix(path);
-		fprintf(
-			stderr,
-			"indirect branch at %s:0x%.8llx\n",
-			section->name,
-			static_cast<unsigned long long>(vma));
+		if(bad_sections.empty() || bad_sections.back() != section->name)
+			bad_sections.push_back(section->name);
 
 		++error_count;
-		if(max_errors == 1) // Skip the 'maximum error count' message in this instance.
+		if(error_count > max_errors)
 			return false;
 
+		_errorf(path, "indirect branch at %s:0x%.8llx", section->name, static_cast<unsigned long long>(vma));
 		return true;
 	}
 
@@ -310,12 +283,12 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		disassemble_info &dinfo,
 		unsigned long max_errors,
 		const char *path,
-		std::unordered_set<std::string> &pending,
+		std::unordered_set<std::string> *pending, // NULL == don't check recursively
 		std::vector<const char *> &todo)
 	{
 		try
 		{
-			bool result = true;
+			unsigned long error_count = 0;
 
 			{
 				_bfd abfd(path);
@@ -342,10 +315,10 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 				// printf("flags: %x %d\n", abfd->flags, abfd->flags & EXEC_P);
 				// printf("start: %lx\n", abfd->start_address);
 
+				std::vector<const char *> bad_sections;
+
 				for(asection *section = abfd->sections; section != nullptr; section = section->next)
 				{
-					unsigned long error_count = 0;
-
 					if(section->flags & SEC_CODE)
 					{
 						/*
@@ -400,7 +373,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 									bfd_byte modrm543 = ptr[1] & 0x38;
 									if(modrm543 == 0x10 || modrm543 == 0x18 || modrm543 == 0x20 || modrm543 == 0x28)
 									{
-										if(!_found_indirect(path, section, vma, error_count, max_errors))
+										if(!_found_indirect(path, section, vma, error_count, max_errors, bad_sections))
 											break;
 									}
 								}
@@ -409,19 +382,28 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 							vma += bytes;
 						}
 					}
-
-					if(error_count)
-						result = false;
 				}
 
-				if(!result && !max_errors)
+				if(error_count)
 				{
+					if(max_errors > 1 && error_count > max_errors)
+						_error(path, "additional indirect branches suppressed");
+
+					// Do this before closing the BFD.
 					_prefix(path);
-					fputs("indirect branch found\n", stderr);
+					fputs("indirect branch(es) found in sections:", stderr);
+					for(const char *section_name: bad_sections)
+					{
+						fputc(' ', stderr);
+						fputs(section_name, stderr);
+					}
+					fputc('\n', stderr);
 				}
 			} // Close the BFD.
 
-			// TODO: re-check error handling for -n0, -n1, -n4.
+			bool result = !error_count;
+			if(!pending)
+				return result; // Skip recursive scan.
 
 			// Using ldd(1) to find dependencies. The second-best alternative is probably to run through the search order
 			// mentioned in Linux's ld.so man page, but that doesn't cover stuff like the /usr/lib/x86_64-linux-gnu path on
@@ -438,15 +420,9 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 				if(!child_pid)
 				{
 					if(dup2(pipe_write, 1) >= 0)
-						execlp("ldd", "ldd", path, NULL);
-
-					int error = errno;
-					_prefix(path);
-					fputs("couldn't execute ldd: ", stderr);
-					fputs(strerror(error), stderr);
-					fputc('\n', stderr);
+						execlp("ldd", "ldd", path, nullptr);
+					_errorf(path, "couldn't execute ldd: %s", strerror(errno));
 					fflush(stderr);
-
 					_exit(EXIT_FAILURE);
 				}
 			} // Close pipe_write.
@@ -479,7 +455,6 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 			// Manual, destructive string parsing; POSIX regex apparently doesn't do non-greedy/minimal matching. And PCRE is
 			// overkill just for this.
 			// Parsing breaks down for libraries with " => " in the name.
-			// TODO: VDSO.
 			char *p = ldd_output.get<char>();
 			char *end = p + ldd_output_size;
 			*end = 0;
@@ -522,9 +497,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 						if(!got_paren)
 						{
-							_prefix(path);
-							fputs(p, stderr);
-							fputc('\n', stderr);
+							_error(path, p);
 							result = false;
 						}
 						else
@@ -533,7 +506,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 							if(strcmp("linux-vdso.so.1", arrow))
 							{
 								std::pair<std::unordered_set<std::string>::iterator, bool> result =
-									pending.insert(std::string(arrow, paren - arrow));
+									pending->insert(std::string(arrow, paren - arrow));
 								if(result.second)
 									todo.push_back(result.first->c_str());
 							}
@@ -542,9 +515,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 					else
 					{
 						// Expecting a 'not found' here.
-						_prefix(path);
-						fputs(p, stderr);
-						fputc('\n', stderr);
+						_error(path, p);
 						result = false;
 					}
 				}
@@ -559,9 +530,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		}
 		catch(const std::exception &exc)
 		{
-			_prefix(path);
-			fputs(exc.what(), stderr);
-			fputc('\n', stderr);
+			_error(path, exc.what());
 		}
 
 		return false;
@@ -571,18 +540,22 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 int main(int argc, char **argv)
 {
 	const char *program_name = argv[0];
-	unsigned long max_errors = 4;
+	unsigned long max_errors = 0;
+
+#ifndef __linux__
+	_error(*argv, "warning: This program may not work on your system.");
+#endif
+
+	// A custom string_set class could combine a hash table node with string data in the same block of memory, saving one
+	// allocation per string. Or I could do things the easy way.
+	std::unordered_set<std::string> pending;
+	std::vector<const char *> todo;
+
+	std::unordered_set<std::string> *pending_ptr = &pending;
 
 	for(;;)
 	{
-		static const struct option longopts[] =
-		{
-			{"help", no_argument, nullptr, 'h'},
-			{"version", no_argument, nullptr, 'v'},
-			{nullptr, 0, nullptr, 0}
-		};
-
-		int optc = getopt_long(argc, argv, "hn:vV", longopts, nullptr);
+		int optc = getopt(argc, argv, "hn:vVx");
 		if(optc < 0)
 			break;
 
@@ -623,6 +596,10 @@ int main(int argc, char **argv)
 				stdout);
 			return EXIT_SUCCESS;
 
+		case 'x':
+			pending_ptr = nullptr;
+			break;
+
 		default:
 			return EXIT_FAILURE;
 		}
@@ -637,19 +614,14 @@ int main(int argc, char **argv)
 
 	bfd_init();
 	disassemble_info dinfo;
-	init_disassemble_info(&dinfo, NULL, _print_nothing);
+	init_disassemble_info(&dinfo, nullptr, _print_nothing);
 	// init_disassemble_info(&dinfo, stderr, (fprintf_ftype)fprintf);
 
 	int result = EXIT_SUCCESS;
 
-	// A custom string_set class could combine a hash table node with string data in the same block of memory, saving one
-	// allocation per string. Or I could do things the easy way.
-	std::unordered_set<std::string> pending;
-	std::vector<const char *> todo;
-
 	do
 	{
-		if(!_audit(dinfo, max_errors, *argv, pending, todo))
+		if(!_audit(dinfo, max_errors, *argv, pending_ptr, todo))
 			result = EXIT_FAILURE;
 		++argv;
 	} while(*argv);
@@ -658,7 +630,7 @@ int main(int argc, char **argv)
 	{
 		const char *path = todo.back();
 		todo.pop_back();
-		if(!_audit(dinfo, max_errors, path, pending, todo))
+		if(!_audit(dinfo, max_errors, path, pending_ptr, todo))
 			result = EXIT_FAILURE;
 	}
 

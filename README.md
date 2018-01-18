@@ -1,18 +1,24 @@
 retpoline-audit
 ===============
 
-A small utility to verify that an executable or shared object is using
-[retpoline](https://support.google.com/faqs/answer/7625886) to mitigate the [Spectre](https://spectreattack.com) vulnerability
-(Variant 2: branch target injection, CVE-2017-5715). Specifically, `retpoline-audit` searches for indirect jumps in a binary and
-its shared object dependencies. This is currently known to compile on and work with binaries for x86_64-linux-gnu (this excludes
-the Linux kernel itself). Other systems may also work, but don't count on it.
+A quick-and-dirty utility to verify that an executable or shared object is using
+[retpolines](https://support.google.com/faqs/answer/7625886) to mitigate the [Spectre](https://spectreattack.com) vulnerability
+(Variant 2: branch target injection, CVE-2017-5715). Specifically, `retpoline-audit` searches for indirect branches in a binary
+and its shared object dependencies. This is currently known to compile on and work with binaries for `x86_64-linux-gnu`. (This
+excludes the Linux kernel itself.) Other systems may also work, but don't count on it.
 
 `retpoline-audit` will not be able to detect all indirect branches, including but not limited to the following scenarios:
 
 * Code in data sections
 * Code generated at runtime
 * The disassembler can (usually briefly) get out of sync with the instruction stream in the padding between legitimate code
-  sequences
+  sequences.
+
+At this time (January 2018), very few executables in the wild have been compiled with retpoline support, and compiler support is
+still in the process of trickling down to end users. For now, running this program on random binaries will show indirect
+branches in nearly everything.
+
+Note that `retpoline-audit` is still somewhat of a prototype at this point.
 
 Security
 --------
@@ -29,6 +35,14 @@ Debian and Ubuntu, this requires the `binutils-dev` package. Once prerequisites 
 
 	$ make
 	$ ./retpoline-audit [program]
+
+Usage
+-----
+
+`-n 4` Display up to 4 indirect branch locations (per binary)
+`-x` Do not scan shared object dependencies
+`-h` Show help
+`-V` Show version
 
 License
 -------
