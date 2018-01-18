@@ -39,10 +39,10 @@ Debian and Ubuntu, this requires the `binutils-dev` package. Once prerequisites 
 Usage
 -----
 
-`-n 4` Display up to 4 indirect branch locations (per binary)
-`-x` Do not scan shared object dependencies
-`-h` Show help
-`-V` Show version
+* `-n 4` Display up to 4 indirect branch locations (per binary)
+* `-x` Do not scan shared object dependencies
+* `-h` Show help
+* `-V` Show version
 
 License
 -------
