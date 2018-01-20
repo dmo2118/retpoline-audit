@@ -22,11 +22,11 @@ AC_TYPE_SSIZE_T
 AC_MSG_CHECKING(for old-style libopcodes disassembler)
 AC_COMPILE_IFELSE(
 	[AC_LANG_SOURCE([
-		#include <bfd.h>
+		#include <dis-asm.h>
 
 		int main()
 		{
-			bfd *abfd = NULL;
+			bfd *abfd = nullptr;
 			disassembler(abfd);
 		}
 	])],
