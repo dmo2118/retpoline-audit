@@ -289,6 +289,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		try
 		{
 			unsigned long error_count = 0;
+			const char *vdso_name = NULL;
 
 			{
 				_bfd abfd(path);
@@ -298,11 +299,26 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 				bfd_architecture arch = bfd_get_arch(abfd);
 				unsigned long mach = bfd_get_mach(abfd);
 
-				if(arch != bfd_arch_i386)
+				if(arch == bfd_arch_i386) // See vdso(1).
+				{
+					switch(mach & (bfd_mach_i386_i386 | bfd_mach_x86_64 | bfd_mach_x64_32))
+					{
+					case bfd_mach_i386_i386:
+						vdso_name = "linux-gate.so.1";
+						break;
+					case bfd_mach_x86_64:
+					case bfd_mach_x64_32:
+						vdso_name = "linux-vdso.so.1";
+						break;
+					default:
+						_unsupported_insn();
+						break;
+					}
+				}
+				else
+				{
 					_unsupported_insn();
-
-				if(!(mach & (bfd_mach_x86_64 | bfd_mach_i386_i386)))
-					_unsupported_insn();
+				}
 
 				disassembler_ftype dis_asm = disassembler(abfd);
 				assert(dis_asm);
@@ -362,7 +378,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 									(*ptr == 0x26 || *ptr == 0x36 || *ptr == 0x2e || *ptr == 0x3e ||
 									 *ptr == 0x64 || *ptr == 0x65 || *ptr == 0x66 || *ptr == 0x67 ||
 									 *ptr == 0xf0 || *ptr == 0xf2 || *ptr == 0xf3 ||
-									((mach & bfd_mach_x86_64) && ((*ptr & 0xf0) == 0x40))))
+									((mach & (bfd_mach_x86_64 | bfd_mach_x64_32)) && ((*ptr & 0xf0) == 0x40))))
 								{
 									++ptr;
 									--remaining;
@@ -435,7 +451,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 				{
 					ldd_output_capacity *= 2;
 					if(!ldd_output_capacity)
-						ldd_output_capacity = 4;
+						ldd_output_capacity = 1024;
 					ldd_output.resize(ldd_output_capacity);
 				}
 				ssize_t size = _errno_exception::check(read(pipe_read, ldd_output.get<char>() + ldd_output_size, ldd_output_capacity - ldd_output_size));
@@ -470,7 +486,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 				if(strcmp(p, "statically linked"))
 				{
-					const char *arrow = strstr(p, " => ");
+					char *arrow = strstr(p, " => ");
 					if(arrow)
 						arrow += 4;
 					else
@@ -483,7 +499,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 						if(paren != arrow)
 						{
 							--paren;
-							while(paren != arrow)
+							do
 							{
 								if(paren[0] == ' ' && paren[1] == '(')
 								{
@@ -493,6 +509,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 								--paren;
 							}
+							while(paren >= arrow);
 						}
 
 						if(!got_paren)
@@ -503,7 +520,25 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 						else
 						{
 							*paren = 0;
-							if(strcmp("linux-vdso.so.1", arrow))
+							if(!*arrow)
+							{
+								// "blah =>  (0x0123abcd) is probably something like a vDSO.
+								if(p == arrow)
+								{
+									_error(path, "ldd(1) parse error");
+									result = false;
+								}
+								else
+								{
+									arrow[-4] = 0;
+									if(!vdso_name || strcmp(vdso_name, p))
+									{
+										_errorf(path, "can't handle dependency: %s", p);
+										result = false;
+									}
+								}
+							}
+							else if(!vdso_name || strcmp(vdso_name, arrow))
 							{
 								std::pair<std::unordered_set<std::string>::iterator, bool> result =
 									pending->insert(std::string(arrow, paren - arrow));
@@ -578,7 +613,7 @@ int main(int argc, char **argv)
 		case 'V':
 		case 'v':
 			fputs(
-				"retpoline-audit 0.1.0\n"
+				"retpoline-audit 0.1.1\n"
 				"Copyright (C) 2018  Dave Odell <dmo2118@gmail.com>\n"
 				"\n"
 				"This program is free software: you can redistribute it and/or modify\n"
