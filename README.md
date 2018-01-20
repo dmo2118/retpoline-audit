@@ -48,9 +48,15 @@ In addition:
 Building
 --------
 
-`retpoline-audit` requires `libbfd` and `libopcodes`, both part of [GNU Binutils](https://www.gnu.org/software/binutils/). On
-Debian and Ubuntu, this requires the `binutils-dev` package. Once prerequisites are installed, type:
+### Prerequisites
 
+* `libbfd` and `libopcodes` from [GNU Binutils](https://www.gnu.org/software/binutils/). Debian and Ubuntu: use `binutils-dev`.
+* C++11 compiler
+* [autoconf](https://gnu.org/s/autoconf) 2.69
+
+### Then, type:
+	$ autoreconf -I.
+	$ ./configure
 	$ make
 	$ ./retpoline-audit [program]
 

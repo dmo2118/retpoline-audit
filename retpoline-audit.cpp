@@ -1,19 +1,34 @@
 /* -*- mode: c; tab-width: 4; fill-column: 128 -*- */
 /* vi: set ts=4 tw=128: */
 
+// BFD needs this as of the fix for https://sourceware.org/bugzilla/show_bug.cgi?id=14072. (Kind of looks like the binutils folx
+// forgot that BFD can be consumed by non-binutils software.)
+#define PACKAGE
+#define PACKAGE_VERSION
+
+// dis-asm.h needs this.
+#include <cstring>
+using std::strchr;
+
 #include <bfd.h>
 #include <dis-asm.h>
 
+#undef PACKAGE
+#undef PACKAGE_VERSION
+
 #include <cassert>
+#include <cerrno>
 #include <cstdio> // Not in the mood for <iostream> right now.
 #include <cstdlib>
 #include <cstdarg>
-#include <cstring>
+#include <string>
 #include <sys/wait.h>
 #include <type_traits>
 #include <unistd.h>
 #include <unordered_set>
 #include <vector>
+
+#include "config.h"
 
 namespace // Lots of little functions and classes, too small to warrant their own header files.
 {
@@ -296,12 +311,21 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 				_bfd::check(bfd_check_format(abfd, bfd_object));
 
-				bfd_architecture arch = bfd_get_arch(abfd);
-				unsigned long mach = bfd_get_mach(abfd);
+				// Stolen from objdump(1).
+				dinfo.flavour = bfd_get_flavour(abfd);
+				dinfo.arch = bfd_get_arch(abfd);
+				dinfo.mach = bfd_get_mach(abfd);
+				dinfo.octets_per_byte = bfd_octets_per_byte(abfd);
+				if(bfd_big_endian(abfd))
+					dinfo.endian = BFD_ENDIAN_BIG;
+				else if(bfd_little_endian(abfd))
+					dinfo.endian = BFD_ENDIAN_LITTLE;
+				else
+					dinfo.endian = BFD_ENDIAN_UNKNOWN;
 
-				if(arch == bfd_arch_i386) // See vdso(1).
+				if(dinfo.arch == bfd_arch_i386) // See vdso(1).
 				{
-					switch(mach & (bfd_mach_i386_i386 | bfd_mach_x86_64 | bfd_mach_x64_32))
+					switch(dinfo.mach & (bfd_mach_i386_i386 | bfd_mach_x86_64 | bfd_mach_x64_32))
 					{
 					case bfd_mach_i386_i386:
 						vdso_name = "linux-gate.so.1";
@@ -320,13 +344,15 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 					_unsupported_insn();
 				}
 
-				disassembler_ftype dis_asm = disassembler(abfd);
+				disassembler_ftype dis_asm = disassembler(
+#ifndef HAVE_DISASSEMBLER_ONE_ARG
+					dinfo.arch,
+					dinfo.endian == BFD_ENDIAN_BIG,
+					dinfo.mach,
+#endif
+					abfd
+					);
 				assert(dis_asm);
-				// Stolen from objdump(1).
-				dinfo.flavour = bfd_get_flavour(abfd);
-				dinfo.arch = bfd_get_arch(abfd);
-				dinfo.mach = bfd_get_mach(abfd);
-				dinfo.octets_per_byte = bfd_octets_per_byte(abfd);
 
 				// printf("flags: %x %d\n", abfd->flags, abfd->flags & EXEC_P);
 				// printf("start: %lx\n", abfd->start_address);
@@ -367,7 +393,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 								break;
 							// printf("  %*s\n", (int)insn_str.size, insn_str.buf);
 
-							if(arch == bfd_arch_i386)
+							if(dinfo.arch == bfd_arch_i386)
 							{
 								bfd_byte *ptr = section_data.get<bfd_byte>() + (vma - section->vma);
 
@@ -378,7 +404,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 									(*ptr == 0x26 || *ptr == 0x36 || *ptr == 0x2e || *ptr == 0x3e ||
 									 *ptr == 0x64 || *ptr == 0x65 || *ptr == 0x66 || *ptr == 0x67 ||
 									 *ptr == 0xf0 || *ptr == 0xf2 || *ptr == 0xf3 ||
-									((mach & (bfd_mach_x86_64 | bfd_mach_x64_32)) && ((*ptr & 0xf0) == 0x40))))
+									((dinfo.mach & (bfd_mach_x86_64 | bfd_mach_x64_32)) && ((*ptr & 0xf0) == 0x40))))
 								{
 									++ptr;
 									--remaining;
@@ -494,7 +520,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 					if(arrow != eol && eol[-1] == ')')
 					{
-						bool got_paren;
+						bool got_paren = false;
 						char *paren = eol - 1;
 						if(paren != arrow)
 						{

@@ -1,0 +1,8 @@
+CXX=@CXX@
+CXXFLAGS=@CXXFLAGS@
+
+retpoline-audit: retpoline-audit.o
+	$(CXX) $^ -lbfd -lopcodes -o $@
+
+clean:
+	-rm retpoline-audit.o retpoline-audit
