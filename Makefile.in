@@ -1,8 +1,13 @@
 CXX=@CXX@
 CXXFLAGS=@CXXFLAGS@
 
-retpoline-audit: retpoline-audit.o
+OBJ=main.o audit.o
+
+retpoline-audit: $(OBJ)
 	$(CXX) $^ -lbfd -lopcodes -o $@
 
+main.o: main.cpp audit.hpp
+audit.o: audit.cpp audit.hpp
+
 clean:
-	-rm retpoline-audit.o retpoline-audit
+	-rm $(OBJ) retpoline-audit
