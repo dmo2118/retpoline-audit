@@ -92,6 +92,26 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		}
 	};
 
+	class _stdio_stream
+	{
+	private:
+		FILE *_stream;
+
+	public:
+		_stdio_stream(FILE *stream): _stream(stream)
+		{
+		}
+
+		~_stdio_stream()
+		{
+		}
+
+		FILE *get() const
+		{
+			return _stream;
+		}
+	};
+
 	class _errno_exception: public std::exception
 	{
 	private:
@@ -110,6 +130,13 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		template<typename T> static T check(T result) // There's a few different int types in use here.
 		{
 			if(result < 0)
+				throw_exception();
+			return result;
+		}
+
+		template<typename T> static T *check(T *result)
+		{
+			if(!result)
 				throw_exception();
 			return result;
 		}
@@ -162,7 +189,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 	class _bfd
 	{
 	private:
-		bfd *_p;
+		bfd *_abfd;
 
 	public:
 		class exception: public _static_string_exception // Must be captured early for bfd_error_system_call.
@@ -181,24 +208,23 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 			}
 		};
 
-		_bfd(const char *filename, const char *target = nullptr):
-			_p(check(bfd_openr(filename, target)))
+		_bfd(bfd *abfd): _abfd(abfd)
 		{
 		}
 
 		~_bfd()
 		{
-			_verify(bfd_close(_p));
+			_verify(bfd_close(_abfd));
 		}
 
 		operator bfd *() const
 		{
-			return _p;
+			return _abfd;
 		}
 
 		bfd *operator ->() const
 		{
-			return _p;
+			return _abfd;
 		}
 
 		/*
@@ -298,16 +324,18 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		disassemble_info &dinfo,
 		unsigned long max_errors,
 		const char *path,
-		std::unordered_set<std::string> *pending, // NULL == don't check recursively
+		std::unordered_set<std::string> *pending, // nullptr == don't check recursively
 		std::vector<const char *> &todo)
 	{
 		try
 		{
 			unsigned long error_count = 0;
-			const char *vdso_name = NULL;
+			const char *vdso_name = nullptr;
+
+			_stdio_stream bin_strm(_errno_exception::check(fopen(path, "rb")));
 
 			{
-				_bfd abfd(path);
+				_bfd abfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
 
 				_bfd::check(bfd_check_format(abfd, bfd_object));
 
