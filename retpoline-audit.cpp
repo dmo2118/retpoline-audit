@@ -320,156 +320,153 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		return true;
 	}
 
-	bool _audit(
+	bool _audit_bfd(
+		bfd *new_bfd,
 		disassemble_info &dinfo,
 		unsigned long max_errors,
-		const char *path,
 		std::unordered_set<std::string> *pending, // nullptr == don't check recursively
 		std::vector<const char *> &todo)
 	{
+		_bfd abfd(new_bfd);
+		const char *path = abfd->filename;
+
 		try
 		{
 			unsigned long error_count = 0;
 			const char *vdso_name = nullptr;
 
-			_stdio_stream bin_strm(_errno_exception::check(fopen(path, "rb")));
+			_bfd::check(bfd_check_format(abfd, bfd_object));
 
+			// Stolen from objdump(1).
+			dinfo.flavour = bfd_get_flavour(abfd);
+			dinfo.arch = bfd_get_arch(abfd);
+			dinfo.mach = bfd_get_mach(abfd);
+			dinfo.octets_per_byte = bfd_octets_per_byte(abfd);
+			if(bfd_big_endian(abfd))
+				dinfo.endian = BFD_ENDIAN_BIG;
+			else if(bfd_little_endian(abfd))
+				dinfo.endian = BFD_ENDIAN_LITTLE;
+			else
+				dinfo.endian = BFD_ENDIAN_UNKNOWN;
+
+			if(dinfo.arch == bfd_arch_i386) // See vdso(1).
 			{
-				_bfd abfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
-
-				_bfd::check(bfd_check_format(abfd, bfd_object));
-
-				// Stolen from objdump(1).
-				dinfo.flavour = bfd_get_flavour(abfd);
-				dinfo.arch = bfd_get_arch(abfd);
-				dinfo.mach = bfd_get_mach(abfd);
-				dinfo.octets_per_byte = bfd_octets_per_byte(abfd);
-				if(bfd_big_endian(abfd))
-					dinfo.endian = BFD_ENDIAN_BIG;
-				else if(bfd_little_endian(abfd))
-					dinfo.endian = BFD_ENDIAN_LITTLE;
-				else
-					dinfo.endian = BFD_ENDIAN_UNKNOWN;
-
-				if(dinfo.arch == bfd_arch_i386) // See vdso(1).
+				switch(dinfo.mach & (bfd_mach_i386_i386 | bfd_mach_x86_64 | bfd_mach_x64_32))
 				{
-					switch(dinfo.mach & (bfd_mach_i386_i386 | bfd_mach_x86_64 | bfd_mach_x64_32))
-					{
-					case bfd_mach_i386_i386:
-						vdso_name = "linux-gate.so.1";
-						break;
-					case bfd_mach_x86_64:
-					case bfd_mach_x64_32:
-						vdso_name = "linux-vdso.so.1";
-						break;
-					default:
-						_unsupported_insn();
-						break;
-					}
-				}
-				else
-				{
+				case bfd_mach_i386_i386:
+					vdso_name = "linux-gate.so.1";
+					break;
+				case bfd_mach_x86_64:
+				case bfd_mach_x64_32:
+					vdso_name = "linux-vdso.so.1";
+					break;
+				default:
 					_unsupported_insn();
+					break;
 				}
+			}
+			else
+			{
+				_unsupported_insn();
+			}
 
-				disassembler_ftype dis_asm = disassembler(
-#ifndef HAVE_DISASSEMBLER_ONE_ARG
-					dinfo.arch,
-					dinfo.endian == BFD_ENDIAN_BIG,
-					dinfo.mach,
-#endif
-					abfd
-					);
-				assert(dis_asm);
+			disassembler_ftype dis_asm = disassembler(
+	#ifndef HAVE_DISASSEMBLER_ONE_ARG
+				dinfo.arch,
+				dinfo.endian == BFD_ENDIAN_BIG,
+				dinfo.mach,
+	#endif
+				abfd
+				);
+			assert(dis_asm);
 
-				// printf("flags: %x %d\n", abfd->flags, abfd->flags & EXEC_P);
-				// printf("start: %lx\n", abfd->start_address);
+			// printf("flags: %x %d\n", abfd->flags, abfd->flags & EXEC_P);
+			// printf("start: %lx\n", abfd->start_address);
 
-				std::vector<const char *> bad_sections;
+			std::vector<const char *> bad_sections;
 
-				for(asection *section = abfd->sections; section != nullptr; section = section->next)
+			for(asection *section = abfd->sections; section != nullptr; section = section->next)
+			{
+				if(section->flags & SEC_CODE)
 				{
-					if(section->flags & SEC_CODE)
-					{
-						/*
-						printf(
-							"section: %s @ %lx -> %lx (%lx) flags = %x\n",
-							section->name,
-							section->filepos,
-							section->vma,
-							section->size,
-							section->flags);
-						*/
+					/*
+					printf(
+						"section: %s @ %lx -> %lx (%lx) flags = %x\n",
+						section->name,
+						section->filepos,
+						section->vma,
+						section->size,
+						section->flags);
+					*/
 
-						_malloc_ptr section_data(
-							[&, section](void *&ptr)
-							{
-								_bfd::check(bfd_malloc_and_get_section(abfd, section, reinterpret_cast<bfd_byte **>(&ptr)));
-							});
-
-						dinfo.buffer = section_data.get<bfd_byte>();
-						dinfo.buffer_vma = section->vma;
-						dinfo.buffer_length = section->size;
-						dinfo.section = section;
-
-						bfd_vma vma = section->vma;
-						bfd_vma vma_end = vma + section->size;
-						while(vma < vma_end)
+					_malloc_ptr section_data(
+						[&, section](void *&ptr)
 						{
-							int bytes = dis_asm(vma, &dinfo);
-							if(bytes < 0)
-								break;
-							// printf("  %*s\n", (int)insn_str.size, insn_str.buf);
+							_bfd::check(bfd_malloc_and_get_section(abfd, section, reinterpret_cast<bfd_byte **>(&ptr)));
+						});
 
-							if(dinfo.arch == bfd_arch_i386)
+					dinfo.buffer = section_data.get<bfd_byte>();
+					dinfo.buffer_vma = section->vma;
+					dinfo.buffer_length = section->size;
+					dinfo.section = section;
+
+					bfd_vma vma = section->vma;
+					bfd_vma vma_end = vma + section->size;
+					while(vma < vma_end)
+					{
+						int bytes = dis_asm(vma, &dinfo);
+						if(bytes < 0)
+							break;
+						// printf("  %*s\n", (int)insn_str.size, insn_str.buf);
+
+						if(dinfo.arch == bfd_arch_i386)
+						{
+							bfd_byte *ptr = section_data.get<bfd_byte>() + (vma - section->vma);
+
+							unsigned remaining = bytes;
+							// Prefixes: SEG=(CS|DS|ES|FS|GS|SS), operand/address size, LOCK, REP*, REX.* (only 64-bit)
+							while(
+								remaining &&
+								(*ptr == 0x26 || *ptr == 0x36 || *ptr == 0x2e || *ptr == 0x3e ||
+								 *ptr == 0x64 || *ptr == 0x65 || *ptr == 0x66 || *ptr == 0x67 ||
+								 *ptr == 0xf0 || *ptr == 0xf2 || *ptr == 0xf3 ||
+								((dinfo.mach & (bfd_mach_x86_64 | bfd_mach_x64_32)) && ((*ptr & 0xf0) == 0x40))))
 							{
-								bfd_byte *ptr = section_data.get<bfd_byte>() + (vma - section->vma);
-
-								unsigned remaining = bytes;
-								// Prefixes: SEG=(CS|DS|ES|FS|GS|SS), operand/address size, LOCK, REP*, REX.* (only 64-bit)
-								while(
-									remaining &&
-									(*ptr == 0x26 || *ptr == 0x36 || *ptr == 0x2e || *ptr == 0x3e ||
-									 *ptr == 0x64 || *ptr == 0x65 || *ptr == 0x66 || *ptr == 0x67 ||
-									 *ptr == 0xf0 || *ptr == 0xf2 || *ptr == 0xf3 ||
-									((dinfo.mach & (bfd_mach_x86_64 | bfd_mach_x64_32)) && ((*ptr & 0xf0) == 0x40))))
-								{
-									++ptr;
-									--remaining;
-								}
-
-								if(remaining >= 2 && ptr[0] == 0xff)
-								{
-									bfd_byte modrm543 = ptr[1] & 0x38;
-									if(modrm543 == 0x10 || modrm543 == 0x18 || modrm543 == 0x20 || modrm543 == 0x28)
-									{
-										if(!_found_indirect(path, section, vma, error_count, max_errors, bad_sections))
-											break;
-									}
-								}
+								++ptr;
+								--remaining;
 							}
 
-							vma += bytes;
+							if(remaining >= 2 && ptr[0] == 0xff)
+							{
+								bfd_byte modrm543 = ptr[1] & 0x38;
+								if(modrm543 == 0x10 || modrm543 == 0x18 || modrm543 == 0x20 || modrm543 == 0x28)
+								{
+									if(!_found_indirect(path, section, vma, error_count, max_errors, bad_sections))
+										break;
+								}
+							}
 						}
+
+						vma += bytes;
 					}
 				}
+			}
 
-				if(error_count)
+			if(error_count)
+			{
+				if(max_errors > 1 && error_count > max_errors)
+					_error(path, "additional indirect branches suppressed");
+
+				// Do this before closing the BFD.
+				_prefix(path);
+				fputs("indirect branch(es) found in sections:", stderr);
+				for(const char *section_name: bad_sections)
 				{
-					if(max_errors > 1 && error_count > max_errors)
-						_error(path, "additional indirect branches suppressed");
-
-					// Do this before closing the BFD.
-					_prefix(path);
-					fputs("indirect branch(es) found in sections:", stderr);
-					for(const char *section_name: bad_sections)
-					{
-						fputc(' ', stderr);
-						fputs(section_name, stderr);
-					}
-					fputc('\n', stderr);
+					fputc(' ', stderr);
+					fputs(section_name, stderr);
 				}
-			} // Close the BFD.
+				fputc('\n', stderr);
+			}
 
 			bool result = !error_count;
 			if(!pending)
@@ -624,6 +621,26 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 		return false;
 	}
+
+	bool _audit(
+		const char *path,
+		disassemble_info &dinfo,
+		unsigned long max_errors,
+		std::unordered_set<std::string> *pending, // nullptr == don't check recursively
+		std::vector<const char *> &todo)
+	{
+		try
+		{
+			_stdio_stream bin_strm(_errno_exception::check(fopen(path, "rb")));
+			return _audit_bfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())), dinfo, max_errors, pending, todo);
+		}
+		catch(const std::exception &exc)
+		{
+			_error(path, exc.what());
+		}
+
+		return false;
+	}
 }
 
 int main(int argc, char **argv)
@@ -710,7 +727,7 @@ int main(int argc, char **argv)
 
 	do
 	{
-		if(!_audit(dinfo, max_errors, *argv, pending_ptr, todo))
+		if(!_audit(*argv, dinfo, max_errors, pending_ptr, todo))
 			result = EXIT_FAILURE;
 		++argv;
 	} while(*argv);
@@ -719,7 +736,7 @@ int main(int argc, char **argv)
 	{
 		const char *path = todo.back();
 		todo.pop_back();
-		if(!_audit(dinfo, max_errors, path, pending_ptr, todo))
+		if(!_audit(path, dinfo, max_errors, pending_ptr, todo))
 			result = EXIT_FAILURE;
 	}
 
