@@ -4,6 +4,7 @@
 #include "audit.hpp"
 
 #include <cassert>
+#include <cerrno>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -292,7 +293,7 @@ bool audit::_found_indirect(
 	return true;
 }
 
-bool audit::_do_bfd(bfd *new_bfd)
+void audit::_do_bfd(bfd *new_bfd)
 {
 	_bfd abfd(new_bfd);
 	const char *path = abfd->filename;
@@ -435,9 +436,11 @@ bool audit::_do_bfd(bfd *new_bfd)
 			fputc('\n', stderr);
 		}
 
-		bool result = !error_count;
+		if(error_count)
+			_result = EXIT_FAILURE;
+
 		if(!_recursive)
-			return result;
+			return;
 
 		// Using ldd(1) to find dependencies. The second-best alternative is probably to run through the search order
 		// mentioned in Linux's ld.so man page, but that doesn't cover stuff like the /usr/lib/x86_64-linux-gnu path on
@@ -481,7 +484,7 @@ bool audit::_do_bfd(bfd *new_bfd)
 		int status;
 		_errno_exception::check(waitpid(child_pid, &status, 0));
 		if(!status)
-			result = false;
+			_result = EXIT_FAILURE;
 
 		if(ldd_output_size == ldd_output_capacity)
 			ldd_output.resize(ldd_output_size + 1);
@@ -533,7 +536,7 @@ bool audit::_do_bfd(bfd *new_bfd)
 					if(!got_paren)
 					{
 						_error(path, p);
-						result = false;
+						_result = EXIT_FAILURE;
 					}
 					else
 					{
@@ -544,7 +547,7 @@ bool audit::_do_bfd(bfd *new_bfd)
 							if(p == arrow)
 							{
 								_error(path, "ldd(1) parse error");
-								result = false;
+								_result = EXIT_FAILURE;
 							}
 							else
 							{
@@ -552,7 +555,7 @@ bool audit::_do_bfd(bfd *new_bfd)
 								if(!vdso_name || strcmp(vdso_name, p))
 								{
 									_errorf(path, "can't handle dependency: %s", p);
-									result = false;
+									_result = EXIT_FAILURE;
 								}
 							}
 						}
@@ -569,7 +572,7 @@ bool audit::_do_bfd(bfd *new_bfd)
 				{
 					// Expecting a 'not found' here.
 					_error(path, p);
-					result = false;
+					_result = EXIT_FAILURE;
 				}
 			}
 
@@ -578,28 +581,36 @@ bool audit::_do_bfd(bfd *new_bfd)
 				break;
 			++p;
 		}
-
-		return result;
 	}
 	catch(const std::exception &exc)
 	{
 		_error(path, exc.what());
+		_result = EXIT_FAILURE;
 	}
-
-	return false;
 }
 
-bool audit::run(const char *path)
+void audit::run(const char *path)
 {
 	try
 	{
 		_stdio_stream bin_strm(_errno_exception::check(fopen(path, "rb")));
-		return _do_bfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
+		_do_bfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
 	}
 	catch(const std::exception &exc)
 	{
 		_error(path, exc.what());
+		_result = EXIT_FAILURE;
+	}
+}
+
+int audit::finish()
+{
+	while(!_todo.empty())
+	{
+		const char *path = _todo.back();
+		_todo.pop_back();
+		run(path);
 	}
 
-	return false;
+	return _result;
 }

@@ -18,6 +18,8 @@ using std::strchr;
 #undef PACKAGE
 #undef PACKAGE_VERSION
 
+#include <cstdlib>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -29,14 +31,14 @@ private:
 	unsigned long _max_errors;
 	bool _recursive;
 
+	int _result;
+
 	// A custom string_set class could combine a hash table node with string data in the same block of memory, saving one
 	// allocation per string. Or I could do things the easy way.
 	std::unordered_set<std::string> _pending;
 	std::vector<const char *> _todo;
 
 	disassemble_info _dinfo;
-
-	bool _do_bfd(bfd *new_bfd);
 
 	static int _print_nothing(void *, const char *, ...);
 	bool _found_indirect(
@@ -46,25 +48,17 @@ private:
 		unsigned long &error_count,
 		std::vector<const char *> &bad_sections);
 
+	void _do_bfd(bfd *new_bfd);
+
 public:
-	audit(unsigned long max_errors, bool recursive): _max_errors(max_errors), _recursive(recursive)
+	audit(unsigned long max_errors, bool recursive): _max_errors(max_errors), _recursive(recursive), _result(EXIT_SUCCESS)
 	{
 		init_disassemble_info(&_dinfo, nullptr, _print_nothing);
 		// init_disassemble_info(&dinfo, stderr, (fprintf_ftype)fprintf);
 	}
 
-	bool run(const char *path);
-
-	void finish(int &result)
-	{
-		while(!_todo.empty())
-		{
-			const char *path = _todo.back();
-			_todo.pop_back();
-			if(!run(path))
-				result = EXIT_FAILURE;
-		}
-	}
+	void run(const char *path);
+	int finish();
 };
 
 #endif

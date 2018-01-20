@@ -80,18 +80,13 @@ int main(int argc, char **argv)
 
 	bfd_init();
 
-	int result = EXIT_SUCCESS;
-
 	audit auditor(max_errors, recursive);
 
 	do
 	{
-		if(!auditor.run(*argv))
-			result = EXIT_FAILURE;
+		auditor.run(*argv);
 		++argv;
 	} while(*argv);
 
-	auditor.finish(result);
-
-	return result;
+	return auditor.finish();
 }

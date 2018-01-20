@@ -3,7 +3,7 @@ AC_INIT(retpoline-audit, 0.1.2, https://github.com/dmo2118/retpoline-audit/issue
 
 AH_TEMPLATE([HAVE_DISASSEMBLER_ONE_ARG], [Define for old style disassembler().])
 
-AC_CONFIG_SRCDIR(retpoline-audit.cpp)
+AC_CONFIG_SRCDIR(main.cpp)
 AC_CONFIG_HEADERS(config.h)
 AC_LANG(C++)
 
