@@ -40,6 +40,10 @@ private:
 
 	disassemble_info _dinfo;
 
+	void _prefix(const char *text);
+	void _error(const char *prefix, const char *message);
+	void _errorf(const char *prefix, const char *format, ...);
+
 	static int _print_nothing(void *, const char *, ...);
 	bool _found_indirect(
 		const char *path,

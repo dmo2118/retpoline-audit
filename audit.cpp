@@ -5,6 +5,7 @@
 
 #include <cassert>
 #include <cerrno>
+#include <cstdarg>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -235,29 +236,6 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		throw _bfd::exception(error);
 	}
 
-	void _prefix(const char *text)
-	{
-		fputs(text, stderr);
-		fputs(": ", stderr);
-	}
-
-	void _error(const char *prefix, const char *message)
-	{
-		_prefix(prefix);
-		fputs(message, stderr);
-		fputc('\n', stderr);
-	}
-
-	void _errorf(const char *prefix, const char *format, ...)
-	{
-		_prefix(prefix);
-		va_list ap;
-		va_start(ap, format);
-		vfprintf(stderr, format, ap);
-		va_end(ap);
-		fputc('\n', stderr);
-	}
-
 	struct _insn_str
 	{
 		char buf[40];
@@ -268,6 +246,30 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 	{
 		throw _static_string_exception("unsupported instruction set");
 	}
+}
+
+void audit::_prefix(const char *text)
+{
+	_result = EXIT_FAILURE;
+	fputs(text, stderr);
+	fputs(": ", stderr);
+}
+
+void audit::_error(const char *prefix, const char *message)
+{
+	_prefix(prefix);
+	fputs(message, stderr);
+	fputc('\n', stderr);
+}
+
+void audit::_errorf(const char *prefix, const char *format, ...)
+{
+	_prefix(prefix);
+	va_list ap;
+	va_start(ap, format);
+	vfprintf(stderr, format, ap);
+	va_end(ap);
+	fputc('\n', stderr);
 }
 
 int audit::_print_nothing(void *, const char *, ...)
@@ -436,9 +438,6 @@ void audit::_do_bfd(bfd *new_bfd)
 			fputc('\n', stderr);
 		}
 
-		if(error_count)
-			_result = EXIT_FAILURE;
-
 		if(!_recursive)
 			return;
 
@@ -536,7 +535,6 @@ void audit::_do_bfd(bfd *new_bfd)
 					if(!got_paren)
 					{
 						_error(path, p);
-						_result = EXIT_FAILURE;
 					}
 					else
 					{
@@ -547,7 +545,6 @@ void audit::_do_bfd(bfd *new_bfd)
 							if(p == arrow)
 							{
 								_error(path, "ldd(1) parse error");
-								_result = EXIT_FAILURE;
 							}
 							else
 							{
@@ -555,7 +552,6 @@ void audit::_do_bfd(bfd *new_bfd)
 								if(!vdso_name || strcmp(vdso_name, p))
 								{
 									_errorf(path, "can't handle dependency: %s", p);
-									_result = EXIT_FAILURE;
 								}
 							}
 						}
@@ -572,7 +568,6 @@ void audit::_do_bfd(bfd *new_bfd)
 				{
 					// Expecting a 'not found' here.
 					_error(path, p);
-					_result = EXIT_FAILURE;
 				}
 			}
 
@@ -585,7 +580,6 @@ void audit::_do_bfd(bfd *new_bfd)
 	catch(const std::exception &exc)
 	{
 		_error(path, exc.what());
-		_result = EXIT_FAILURE;
 	}
 }
 
@@ -599,7 +593,6 @@ void audit::run(const char *path)
 	catch(const std::exception &exc)
 	{
 		_error(path, exc.what());
-		_result = EXIT_FAILURE;
 	}
 }
 
