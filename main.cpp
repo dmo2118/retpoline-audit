@@ -44,7 +44,7 @@ int main(int argc, char **argv)
 		case 'V':
 		case 'v':
 			fputs(
-				"retpoline-audit 0.1.1\n"
+				PACKAGE_STRING "\n"
 				"Copyright (C) 2018  Dave Odell <dmo2118@gmail.com>\n"
 				"\n"
 				"This program is free software: you can redistribute it and/or modify\n"

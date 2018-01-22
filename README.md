@@ -8,8 +8,8 @@ and its shared object dependencies.
 
 This is currently known to compile on and work with userspace binaries for the following systems:
 
-* `x86_64-pc-linux-gnu`
-* `i686-pc-linux-gnu`
+* GNU/Linux (`i386`, `x86_64`)
+* macOS (Intel)
 
 Other systems may also work, but don't count on it.
 
@@ -44,6 +44,8 @@ In addition:
 * Binaries with `" => "` or parenthesis in the name can break dependency scanning.
 * Shared object dependencies with the same name as the system's vDSO may be skipped during dependency scanning.
 * Dependency scanning won't work for binaries that aren't supported by the host system.
+* Fat binaries on macOS always have all slices checked. Dependency chains can differ for different architectures, and
+  `retpoline-audit` may bring in binaries that a slice normally wouldn't load.
 
 Building
 --------

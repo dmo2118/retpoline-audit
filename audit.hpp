@@ -18,6 +18,7 @@ using std::strchr;
 #undef PACKAGE
 #undef PACKAGE_VERSION
 
+// bfd.h and dis-asm.h both bring in C headers, so there's a bunch of places where "std::" just isn't necessary.
 #include <cstdlib>
 #include <string>
 #include <unordered_set>
@@ -28,6 +29,8 @@ using std::strchr;
 class audit
 {
 private:
+	typedef file_ptr (*pread_type)(bfd *, void *, void *, file_ptr, file_ptr);
+
 	unsigned long _max_errors;
 	bool _recursive;
 
@@ -52,7 +55,15 @@ private:
 		unsigned long &error_count,
 		std::vector<const char *> &bad_sections);
 
-	void _do_bfd(bfd *new_bfd);
+	static void _pread(bfd *abfd, void *stream, pread_type pread, void *buf, file_ptr nbytes, file_ptr offset);
+	template<typename T> static void _pread(bfd *abfd, void *stream, pread_type pread, T &buf, file_ptr offset)
+	{
+		_pread(abfd, stream, pread, &buf, sizeof(T), offset);
+	}
+
+	void _add_dependency(const char *begin, size_t size);
+	void _add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr offset);
+	void _do_bfd(bfd *abfd, void *stream, pread_type pread);
 
 public:
 	audit(unsigned long max_errors, bool recursive): _max_errors(max_errors), _recursive(recursive), _result(EXIT_SUCCESS)

@@ -14,6 +14,13 @@ AX_CXXFLAGS_WARN_ALL
 # autoscan(1) recommends a barrage of tests for libraries, headers, etc., but much of what it found are hard requirements
 # (C++11, binutils libs), without which retpoline-audit won't build. These will not be checked for; failure happens during make.
 
+# Checks for libraries.
+AC_CHECK_LIB(intl, libintl_dgettext) # libbfd needs this on macOS.
+
+# Checks for header files.
+AC_CHECK_HEADERS(mach-o/fat.h)
+AC_CHECK_HEADERS(mach-o/loader.h)
+
 # Checks for typedefs, structures, and compiler characteristics. (No need for full POSIX to be a hard requirement.)
 # Unfortunately checks for a bunch of C headers as a prerequisite.
 AC_TYPE_PID_T

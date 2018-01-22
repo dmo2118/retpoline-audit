@@ -9,6 +9,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if HAVE_MACH_O_FAT_H
+#	include <mach-o/fat.h>
+#endif
+#if HAVE_MACH_O_LOADER_H
+#	include <mach-o/loader.h>
+#endif
+
 namespace // Lots of little functions and classes, too small to warrant their own header files.
 {
 	template<typename T, size_t N> constexpr inline size_t _arraysize(T (&)[N])
@@ -24,72 +31,37 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 	#endif
 	}
 
-	class _malloc_ptr
+	inline std::uint32_t _byte_swap(std::uint32_t x)
 	{
-	private:
-		void *_ptr;
-
-	public:
-		template<typename Proc> _malloc_ptr(const Proc &proc) // It's my hot program I'll do what I want.
-		{
-#ifndef NDEBUG
-			_ptr = reinterpret_cast<void *>(0xbaadf00d);
+#if 0 // defined __GNUC__ || defined __clang__
+		return __builtin_bswap32(x);
+#else
+		std::uint32_t a = x << 8;
+		x = (((x >> 8) ^ a) & 0x00ff00ff) ^ a;
+		x = (x >> 16) | (x << 16);
+		return x;
 #endif
-			proc(_ptr);
-			assert(_ptr != reinterpret_cast<void *>(0xbaadf00d));
-		}
+	}
 
-		_malloc_ptr(): _ptr(nullptr)
-		{
-		}
-
-		~_malloc_ptr()
-		{
-			free(_ptr);
-		}
-
-		_malloc_ptr &operator =(_malloc_ptr &&ptr)
-		{
-			free(_ptr);
-			_ptr = ptr._ptr;
-			ptr._ptr = nullptr;
-			return *this;
-		}
-
-		template<typename T> T *get() const
-		{
-			static_assert(std::is_pod<T>::value, "_malloc_ptr can only contain POD types");
-			return static_cast<T *>(_ptr);
-		}
-
-		void resize(size_t new_size)
-		{
-			void *new_ptr = realloc(_ptr, new_size);
-			if(!new_ptr) // POSIX guarantees that errno is set, but C (and C++) does not.
-				throw std::bad_alloc();
-			_ptr = new_ptr;
-		}
-	};
-
-	class _stdio_stream
+	std::uint32_t _no_swap(std::uint32_t x)
 	{
-	private:
-		FILE *_stream;
+		return x;
+	}
 
-	public:
-		_stdio_stream(FILE *stream): _stream(stream)
-		{
-		}
+	inline std::int32_t _byte_swap(std::int32_t x)
+	{
+		return _byte_swap(std::uint32_t(x));
+	}
 
-		~_stdio_stream()
-		{
-		}
-
-		FILE *get() const
-		{
-			return _stream;
-		}
-	};
+	template<typename T> inline T _big_endian(T x)
+	{
+		return
+#if WORDS_BIGENDIAN
+			x;
+#else
+			_byte_swap(x);
+#endif
+	}
 
 	class _errno_exception: public std::exception
 	{
@@ -128,6 +100,103 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		throw _errno_exception(error);
 	}
 
+	class _malloc_ptr
+	{
+	private:
+		void *_ptr;
+
+	public:
+		static void *check(void *ptr)
+		{
+			return ptr;
+		}
+
+		template<typename Proc> _malloc_ptr(const Proc &proc) // It's my hot program I'll do what I want.
+		{
+#ifndef NDEBUG
+			_ptr = reinterpret_cast<void *>(0xbaadf00d);
+#endif
+			proc(_ptr);
+			assert(_ptr != reinterpret_cast<void *>(0xbaadf00d));
+		}
+
+		_malloc_ptr(): _ptr(nullptr)
+		{
+		}
+
+		~_malloc_ptr()
+		{
+			free(_ptr);
+		}
+
+		_malloc_ptr &operator =(_malloc_ptr &&ptr)
+		{
+			free(_ptr);
+			_ptr = ptr._ptr;
+			ptr._ptr = nullptr;
+			return *this;
+		}
+
+		template<typename T> T *get() const
+		{
+			static_assert(std::is_pod<T>::value, "_malloc_ptr can only contain POD types");
+			return static_cast<T *>(_ptr);
+		}
+
+		void resize(size_t new_size)
+		{
+			void *new_ptr = realloc(_ptr, new_size);
+			if(!new_ptr) // POSIX guarantees that errno is set, but C (and C++) does not.
+				_errno_exception::throw_exception(ENOMEM); // Could also use std::bad_alloc.
+			_ptr = new_ptr;
+		}
+	};
+
+	// Pointless optimization alert: std::vector<char> zeros out its memory; this doesn't.
+	class _malloc_vector
+	{
+	private:
+		_malloc_ptr _ptr;
+		size_t _size, _capacity;
+
+	public:
+		_malloc_vector(): _size(0), _capacity(0)
+		{
+		}
+
+		void *append0(size_t n)
+		{
+			size_t new_size = _size + n;
+			if(new_size > _capacity)
+			{
+				_capacity = std::max(_capacity * 2, new_size);
+				_ptr.resize(_capacity);
+			}
+			return _ptr.get<char>() + _size;
+		}
+
+		void append1(size_t n)
+		{
+			_size += n;
+			assert(_size <= _capacity);
+		}
+
+		size_t size() const
+		{
+			return _size;
+		}
+
+		size_t capacity() const
+		{
+			return _capacity;
+		}
+
+		template<typename T> T *data()
+		{
+			return _ptr.get<T>();
+		}
+	};
+
 	class _static_string_exception: public std::exception
 	{
 	private:
@@ -138,11 +207,42 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		{
 		}
 
-		const char *what() const throw()
-		{
-			return _what;
-		}
+		const char *what() const throw();
 	};
+
+	const char *_static_string_exception::what() const throw()
+	{
+		return _what;
+	}
+
+	class _stdio_stream
+	{
+	private:
+		FILE *_stream;
+
+	public:
+		_stdio_stream(FILE *stream): _stream(stream)
+		{
+		}
+
+		~_stdio_stream()
+		{
+		}
+
+		FILE *get() const
+		{
+			return _stream;
+		}
+
+		size_t check(size_t n) const;
+	};
+
+	size_t _stdio_stream::check(size_t n) const
+	{
+		if(!n && ferror(_stream))
+			throw _static_string_exception("I/O error"); // How descriptive.
+		return n;
+	}
 
 	class _file
 	{
@@ -196,24 +296,10 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 			_verify(bfd_close(_abfd));
 		}
 
-		operator bfd *() const
+		bfd *get() const
 		{
 			return _abfd;
 		}
-
-		bfd *operator ->() const
-		{
-			return _abfd;
-		}
-
-		/*
-		static int check(int x)
-		{
-			if(x < 0)
-				throw_exception();
-			return x;
-		}
-		*/
 
 		static void check(bfd_boolean x)
 		{
@@ -236,15 +322,93 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		throw _bfd::exception(error);
 	}
 
-	struct _insn_str
-	{
-		char buf[40];
-		size_t size;
-	};
-
 	[[noreturn]] void _unsupported_insn()
 	{
 		throw _static_string_exception("unsupported instruction set");
+	}
+
+	struct _stdio_subset
+	{
+		FILE *stream;
+		file_ptr begin;
+		file_ptr size;
+
+		static void *open(bfd *nbfd, void *open_closure);
+		static file_ptr pread(bfd *nbfd, void *stream, void *buf, file_ptr nbytes, file_ptr offset);
+		static int close(bfd *nbfd, void *stream);
+		static int stat(bfd *nbfd, void *stream, struct stat *sb);
+	};
+
+	void *_stdio_subset::open(bfd *nbfd, void *open_closure)
+	{
+		return open_closure;
+	}
+
+	file_ptr _stdio_subset::pread(bfd *nbfd, void *stream, void *buf, file_ptr nbytes, file_ptr offset)
+	{
+		_stdio_subset *self = static_cast<_stdio_subset *>(stream);
+		if(offset > self->size)
+			return 0;
+
+		file_ptr max_bytes = self->size - offset;
+		if(nbytes > max_bytes)
+			nbytes = max_bytes;
+
+		if(fseek(self->stream, offset + self->begin, SEEK_SET) < 0)
+		{
+			bfd_set_error(bfd_error_system_call);
+			return -1;
+		}
+
+		int result = fread(buf, 1, nbytes, self->stream);
+		if(!result && ferror(self->stream))
+		{
+			bfd_set_error(bfd_error_system_call); // Assuming errno is set...somewhere?
+			return -1;
+		}
+
+		return result;
+	}
+
+	int _stdio_subset::close(bfd *nbfd, void *stream)
+	{
+		return 0;
+	}
+
+	int _stdio_subset::stat(bfd *nbfd, void *stream, struct stat *sb)
+	{
+		_stdio_subset *self = static_cast<_stdio_subset *>(stream);
+
+		// ####: Who doesn't support fileno?
+		int result = fstat(fileno(self->stream), sb);
+		if(result >= 0)
+			sb->st_size = self->size;
+		return result;
+	}
+
+	// This is a lot like _stdio_subset::pread().
+	file_ptr _stdio_pread(bfd *nbfd, void *stream_raw, void *buf, file_ptr nbytes, file_ptr offset)
+	{
+		FILE *stream = static_cast<FILE *>(stream_raw);
+		if(fseek(stream, offset, SEEK_SET) < 0)
+		{
+			bfd_set_error(bfd_error_system_call);
+			return -1;
+		}
+
+		int result = fread(buf, 1, nbytes, stream);
+		if(!result && ferror(stream))
+		{
+			bfd_set_error(bfd_error_system_call); // Assuming errno is set...somewhere?
+			return -1;
+		}
+
+		return result;
+	}
+
+	[[noreturn]] void _truncated()
+	{
+		_bfd::throw_exception(bfd_error_file_truncated);
 	}
 }
 
@@ -295,9 +459,54 @@ bool audit::_found_indirect(
 	return true;
 }
 
-void audit::_do_bfd(bfd *new_bfd)
+void audit::_pread(bfd *abfd, void *stream, pread_type pread, void *buf, file_ptr nbytes, file_ptr offset)
 {
-	_bfd abfd(new_bfd);
+	file_ptr result = pread(abfd, stream, buf, nbytes, offset);
+	if(result < 0)
+		_bfd::throw_exception();
+
+	assert(result <= nbytes);
+	if(result < nbytes)
+		_truncated();
+}
+
+void audit::_add_dependency(const char *begin, size_t size)
+{
+	std::pair<std::unordered_set<std::string>::iterator, bool> result = _pending.insert(std::string(begin, size));
+	if(result.second)
+		_todo.push_back(result.first->c_str());
+}
+
+void audit::_add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr offset)
+{
+	_malloc_vector path;
+	size_t path_size = 0;
+	for(;;)
+	{
+		size_t buf_capacity = path.size() ? path.size() : 2;
+		char *buf = static_cast<char *>(path.append0(buf_capacity));
+
+		file_ptr buf_size = pread(abfd, stream, buf, buf_capacity, offset);
+		_bfd::check(buf_size >= 0);
+		path.append1(buf_size);
+		if(!buf_size)
+			_truncated();
+
+		size_t append_size = strnlen(buf, buf_size);
+		path_size += append_size;
+		assert(append_size <= buf_size);
+
+		if(append_size != buf_size)
+			break;
+
+		offset += append_size;
+	}
+
+	_add_dependency(path.data<char>(), path_size);
+}
+
+void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
+{
 	const char *path = abfd->filename;
 
 	try
@@ -389,6 +598,7 @@ void audit::_do_bfd(bfd *new_bfd)
 						break;
 					// printf("  %*s\n", (int)insn_str.size, insn_str.buf);
 
+					// TODO: ARM is probably LDR PC, (something) for indirect jumps.
 					if(_dinfo.arch == bfd_arch_i386)
 					{
 						bfd_byte *ptr = section_data.get<bfd_byte>() + (vma - section->vma);
@@ -441,6 +651,64 @@ void audit::_do_bfd(bfd *new_bfd)
 		if(!_recursive)
 			return;
 
+#if HAVE_MACH_O_LOADER_H
+		if(abfd->xvec->flavour == bfd_target_mach_o_flavour)
+		{
+			mach_header header; // mach_header_64 contains a mach_header, more or less.
+			_pread(abfd, stream, pread, header, 0);
+
+			uint32_t (*read32)(uint32_t);
+
+			if(header.magic == MH_MAGIC || header.magic == MH_MAGIC_64)
+				read32 = _no_swap;
+			else if(header.magic == MH_CIGAM || header.magic == MH_CIGAM_64)
+				read32 = _byte_swap;
+			else
+				_bfd::throw_exception(bfd_error_file_not_recognized); // Save a string.
+
+			file_ptr offset =
+				header.magic == MH_MAGIC_64 || header.magic == MH_CIGAM_64 ?
+				sizeof(mach_header_64) :
+				sizeof(mach_header);
+
+			// TODO: Make sure header.sizeofcmds matches offset at the end of this.
+			// uint32_t sizeofcmds = read32(header.sizeofcmds);
+
+			union
+			{
+				load_command base;
+				dylinker_command dylinker;
+				dylib_command dylib;
+			} lc;
+
+			for(uint32_t i = read32(header.ncmds); i; --i)
+			{
+				_pread(abfd, stream, pread, lc.base, offset);
+				switch(read32(lc.base.cmd))
+				{
+				case LC_LOAD_DYLINKER:
+					if(lc.base.cmdsize < sizeof(lc.dylinker))
+						_truncated(); // TODO: Probably needs a better message. (bfd_error_malformed_archive?)
+					_pread(abfd, stream, pread, lc.dylinker, offset);
+					_add_dependency(abfd, stream, pread, offset + read32(lc.dylinker.name.offset));
+					break;
+				case LC_LOAD_DYLIB:
+					if(lc.base.cmdsize < sizeof(lc.dylib))
+						_truncated();
+					_pread(abfd, stream, pread, lc.dylib, offset);
+					_add_dependency(abfd, stream, pread, offset + read32(lc.dylib.dylib.name.offset));
+					break;
+				}
+
+				offset += lc.base.cmdsize;
+			}
+
+			return;
+		}
+#endif
+
+		// PE uses bfd_target_coff_flavour. (Maybe they shouldn't? Hmm.)
+
 		// Using ldd(1) to find dependencies. The second-best alternative is probably to run through the search order
 		// mentioned in Linux's ld.so man page, but that doesn't cover stuff like the /usr/lib/x86_64-linux-gnu path on
 		// Debian.
@@ -463,21 +731,18 @@ void audit::_do_bfd(bfd *new_bfd)
 			}
 		} // Close pipe_write.
 
-		_malloc_ptr ldd_output; // std::vector would zero out its memory, and this doesn't need that.
-		size_t ldd_output_size = 0, ldd_output_capacity = 0;
+		_malloc_vector ldd_output;
 		for(;;)
 		{
-			if(ldd_output_size == ldd_output_capacity)
-			{
-				ldd_output_capacity *= 2;
-				if(!ldd_output_capacity)
-					ldd_output_capacity = 1024;
-				ldd_output.resize(ldd_output_capacity);
-			}
-			ssize_t size = _errno_exception::check(read(pipe_read, ldd_output.get<char>() + ldd_output_size, ldd_output_capacity - ldd_output_size));
+			size_t size = ldd_output.capacity() - ldd_output.size();
+			if(!size)
+				size = std::max(ldd_output.size(), 1024ul);
+
+			size = _errno_exception::check(read(pipe_read, ldd_output.append0(size), size));
+
+			ldd_output.append1(size);
 			if(!size)
 				break;
-			ldd_output_size += size;
 		}
 
 		int status;
@@ -485,14 +750,14 @@ void audit::_do_bfd(bfd *new_bfd)
 		if(!status)
 			_result = EXIT_FAILURE;
 
-		if(ldd_output_size == ldd_output_capacity)
-			ldd_output.resize(ldd_output_size + 1);
+		*static_cast<char *>(ldd_output.append0(1)) = 0;
+		ldd_output.append1(1);
 
 		// Manual, destructive string parsing; POSIX regex apparently doesn't do non-greedy/minimal matching. And PCRE is
 		// overkill just for this.
 		// Parsing breaks down for libraries with " => " in the name.
-		char *p = ldd_output.get<char>();
-		char *end = p + ldd_output_size;
+		char *p = ldd_output.data<char>();
+		char *end = p + ldd_output.size() - 1;
 		*end = 0;
 		while(p != end)
 		{
@@ -557,10 +822,7 @@ void audit::_do_bfd(bfd *new_bfd)
 						}
 						else if(!vdso_name || strcmp(vdso_name, arrow))
 						{
-							std::pair<std::unordered_set<std::string>::iterator, bool> result =
-								_pending.insert(std::string(arrow, paren - arrow));
-							if(result.second)
-								_todo.push_back(result.first->c_str());
+							_add_dependency(arrow, paren - arrow);
 						}
 					}
 				}
@@ -588,7 +850,65 @@ void audit::run(const char *path)
 	try
 	{
 		_stdio_stream bin_strm(_errno_exception::check(fopen(path, "rb")));
-		_do_bfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
+#if HAVE_MACH_O_FAT_H
+		fat_header header;
+		// FAT_MAGIC (0xCAFEBABE) is the same magic number that Java uses for its .class files.
+		// James Gosling says it's his fault: <http://radio-weblogs.com/0100490/2003/01/28.html>.
+		if(bin_strm.check(fread(&header, sizeof(header), 1, bin_strm.get())) && header.magic == _big_endian(FAT_MAGIC))
+		{
+			uint32_t nfat_arch = _big_endian(header.nfat_arch);
+
+			std::unique_ptr<char []> path_with_suffix(new char[strlen(path) + 32]);
+			char *suffix = stpcpy(path_with_suffix.get(), path); // stpcpy: Only sort of portable.
+			*suffix = ':';
+			++suffix;
+
+			for(uint32_t i = 0; i != nfat_arch; ++i)
+			{
+				fat_arch arch;
+				_errno_exception::check(fseek(bin_strm.get(), sizeof(fat_header) + i * sizeof(fat_arch), SEEK_SET));
+				if(!bin_strm.check(fread(&arch, sizeof(arch), 1, bin_strm.get())))
+					_truncated();
+
+				// TODO: Make sure the image starts after the end of the fat_arch array.
+				// TODO: Verify that the architecture contains a Mach-O image, and not something else.
+				_stdio_subset subset = {bin_strm.get(), _big_endian(arch.offset), _big_endian(arch.size)};
+
+				cpu_type_t cputype = _big_endian(arch.cputype);
+				cpu_subtype_t cpusubtype = _big_endian(arch.cpusubtype) & ~cpu_subtype_t(CPU_SUBTYPE_MASK);
+
+				if(cputype == CPU_TYPE_I386 && cpusubtype == CPU_SUBTYPE_I386_ALL)
+					strcpy(suffix, "i386");
+				else if(cputype == CPU_TYPE_X86_64 && cpusubtype == CPU_SUBTYPE_X86_64_ALL)
+					strcpy(suffix, "x86_64");
+				else if(cputype == CPU_TYPE_X86_64 && cpusubtype == CPU_SUBTYPE_X86_64_H)
+					strcpy(suffix, "x86-64h");
+				else
+					sprintf(suffix, "%x,%x", (int)_big_endian(arch.cputype), (int)_big_endian(arch.cpusubtype));
+
+				_bfd abfd(
+					_bfd::check(
+						bfd_openr_iovec(
+							path_with_suffix.get(),
+							NULL,
+							_stdio_subset::open,
+							&subset,
+							_stdio_subset::pread,
+							_stdio_subset::close,
+							_stdio_subset::stat)));
+				_do_bfd(abfd.get(), &subset, _stdio_subset::pread);
+			}
+			return;
+		}
+
+		errno = 0;
+		rewind(bin_strm.get());
+		int error = errno;
+		if(error)
+			_errno_exception::throw_exception();
+#endif
+		_bfd abfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
+		_do_bfd(abfd.get(), bin_strm.get(), _stdio_pread);
 	}
 	catch(const std::exception &exc)
 	{
