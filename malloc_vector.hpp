@@ -17,6 +17,10 @@ public:
 	{
 	}
 
+	malloc_vector(malloc_vector &&x): _ptr(std::move(x._ptr)), _size(x._size), _capacity(x._capacity)
+	{
+	}
+
 	void *append0(size_t n)
 	{
 		size_t new_size = _size + n;
@@ -47,6 +51,17 @@ public:
 	template<typename T> T *data()
 	{
 		return _ptr.get<T>();
+	}
+
+	template<typename T> const T *data() const
+	{
+		return _ptr.get<T>();
+	}
+
+	void shrink_to_fit()
+	{
+		_ptr.resize(_size);
+		_capacity = _size;
 	}
 };
 

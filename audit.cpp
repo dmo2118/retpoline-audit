@@ -355,10 +355,15 @@ void audit::_add_dependency(const char *begin, size_t size)
 		_todo.push_back(result.first->c_str());
 }
 
-void audit::_add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr offset)
+void audit::_add_dependency(const malloc_vector &path)
+{
+	_add_dependency(path.data<char>(), path.size());
+}
+
+malloc_vector audit::_read_null_str(bfd *abfd, void *stream, pread_type pread, file_ptr offset)
 {
 	malloc_vector path;
-	size_t path_size = 0;
+
 	for(;;)
 	{
 		size_t buf_capacity = path.size() ? path.size() : 128;
@@ -366,13 +371,13 @@ void audit::_add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr 
 
 		file_ptr buf_size = pread(abfd, stream, buf, buf_capacity, offset);
 		_bfd::check(buf_size >= 0);
-		path.append1(buf_size);
+
 		if(!buf_size)
 			_truncated();
 
 		size_t append_size = strnlen(buf, buf_size);
-		path_size += append_size;
 		assert(append_size <= uint64_t(buf_size));
+		path.append1(append_size);
 
 		if(append_size != uint64_t(buf_size))
 			break;
@@ -380,7 +385,8 @@ void audit::_add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr 
 		offset += append_size;
 	}
 
-	_add_dependency(path.data<char>(), path_size);
+	path.shrink_to_fit();
+	return path;
 }
 
 void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
@@ -568,13 +574,13 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 					if(lc.base.cmdsize < sizeof(lc.dylinker))
 						_truncated(); // TODO: Probably needs a better message. (bfd_error_malformed_archive?)
 					_pread(abfd, stream, pread, lc.dylinker, offset);
-					_add_dependency(abfd, stream, pread, offset + read32(lc.dylinker.name.offset));
+					_add_dependency(_read_null_str(abfd, stream, pread, offset + read32(lc.dylinker.name.offset)));
 					break;
 				case LC_LOAD_DYLIB:
 					if(lc.base.cmdsize < sizeof(lc.dylib))
 						_truncated();
 					_pread(abfd, stream, pread, lc.dylib, offset);
-					_add_dependency(abfd, stream, pread, offset + read32(lc.dylib.dylib.name.offset));
+					_add_dependency(_read_null_str(abfd, stream, pread, offset + read32(lc.dylib.dylib.name.offset)));
 					break;
 				}
 

@@ -1,10 +1,11 @@
 CXX=@CXX@
 CXXFLAGS=@CXXFLAGS@
+LIBS=@LIBS@
 
 OBJ=main.o audit.o errno_exception.o
 
 retpoline-audit: $(OBJ)
-	$(CXX) $^ -lbfd -lopcodes -o $@
+	$(CXX) $^ -lbfd -lopcodes $(LIBS) -o $@
 
 main.o: main.cpp audit.hpp errno_exception.hpp malloc_ptr.hpp malloc_vector.hpp
 audit.o: audit.cpp audit.hpp errno_exception.hpp malloc_ptr.hpp malloc_vector.hpp

@@ -25,8 +25,10 @@ AC_CHECK_HEADERS(mach-o/loader.h)
 # Unfortunately checks for a bunch of C headers as a prerequisite.
 AC_TYPE_PID_T
 AC_TYPE_SSIZE_T
+AC_C_BIGENDIAN
 
-AC_MSG_CHECKING(for old-style libopcodes disassembler)
+# Checks for library functions.
+AC_MSG_CHECKING([for old-style libopcodes disassembler])
 AC_COMPILE_IFELSE(
 	[AC_LANG_SOURCE([
 		#include <dis-asm.h>

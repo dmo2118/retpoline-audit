@@ -18,6 +18,8 @@ using std::strchr;
 #undef PACKAGE
 #undef PACKAGE_VERSION
 
+#include "malloc_vector.hpp"
+
 // bfd.h and dis-asm.h both bring in C headers, so there's a bunch of places where "std::" just isn't necessary.
 #include <cstdlib>
 #include <string>
@@ -62,7 +64,8 @@ private:
 	}
 
 	void _add_dependency(const char *begin, size_t size);
-	void _add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr offset);
+	void _add_dependency(const malloc_vector &path);
+	static malloc_vector _read_null_str(bfd *abfd, void *stream, pread_type pread, file_ptr offset);
 	void _do_bfd(bfd *abfd, void *stream, pread_type pread);
 
 public:

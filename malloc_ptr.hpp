@@ -30,6 +30,11 @@ public:
 		assert(_ptr != reinterpret_cast<void *>(0xbaadf00d));
 	}
 
+	malloc_ptr(malloc_ptr &&x): _ptr(x._ptr)
+	{
+		x._ptr = nullptr;
+	}
+
 	malloc_ptr(): _ptr(nullptr)
 	{
 	}

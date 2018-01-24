@@ -46,6 +46,7 @@ In addition:
 * Dependency scanning won't work for binaries that aren't supported by the host system.
 * Fat binaries on macOS always have all slices checked. Dependency chains can differ for different architectures, and
   `retpoline-audit` may bring in binaries that a slice normally wouldn't load.
+* macOS: Some sections show up with slightly different names, e.g. `__TEXT.__text` shows up as just `.text`.
 
 Building
 --------
