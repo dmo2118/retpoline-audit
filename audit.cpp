@@ -43,10 +43,12 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 #endif
 	}
 
+#if HAVE_MACH_O_LOADER_H
 	std::uint32_t _no_swap(std::uint32_t x)
 	{
 		return x;
 	}
+#endif
 
 	inline std::int32_t _byte_swap(std::int32_t x)
 	{
@@ -234,15 +236,19 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 			return _stream;
 		}
 
+#if HAVE_MACH_O_FAT_H
 		size_t check(size_t n) const;
+#endif
 	};
 
+#if HAVE_MACH_O_FAT_H
 	size_t _stdio_stream::check(size_t n) const
 	{
 		if(!n && ferror(_stream))
 			throw _static_string_exception("I/O error"); // How descriptive.
 		return n;
 	}
+#endif
 
 	class _file
 	{
@@ -327,6 +333,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		throw _static_string_exception("unsupported instruction set");
 	}
 
+#if HAVE_MACH_O_FAT_H
 	struct _stdio_subset
 	{
 		FILE *stream;
@@ -385,6 +392,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 			sb->st_size = self->size;
 		return result;
 	}
+#endif
 
 	// This is a lot like _stdio_subset::pread().
 	file_ptr _stdio_pread(bfd *nbfd, void *stream_raw, void *buf, file_ptr nbytes, file_ptr offset)
@@ -483,7 +491,7 @@ void audit::_add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr 
 	size_t path_size = 0;
 	for(;;)
 	{
-		size_t buf_capacity = path.size() ? path.size() : 2;
+		size_t buf_capacity = path.size() ? path.size() : 128;
 		char *buf = static_cast<char *>(path.append0(buf_capacity));
 
 		file_ptr buf_size = pread(abfd, stream, buf, buf_capacity, offset);
@@ -494,9 +502,9 @@ void audit::_add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr 
 
 		size_t append_size = strnlen(buf, buf_size);
 		path_size += append_size;
-		assert(append_size <= buf_size);
+		assert(append_size <= uint64_t(buf_size));
 
-		if(append_size != buf_size)
+		if(append_size != uint64_t(buf_size))
 			break;
 
 		offset += append_size;
@@ -736,7 +744,7 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 		{
 			size_t size = ldd_output.capacity() - ldd_output.size();
 			if(!size)
-				size = std::max(ldd_output.size(), 1024ul);
+				size = std::max(ldd_output.size(), size_t(8192));
 
 			size = _errno_exception::check(read(pipe_read, ldd_output.append0(size), size));
 
