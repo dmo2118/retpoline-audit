@@ -3,6 +3,10 @@
 
 #include "audit.hpp"
 
+#include "errno_exception.hpp"
+#include "malloc_ptr.hpp"
+#include "malloc_vector.hpp"
+
 #include <cassert>
 #include <cerrno>
 #include <cstdarg>
@@ -64,140 +68,6 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 			_byte_swap(x);
 #endif
 	}
-
-	class _errno_exception: public std::exception
-	{
-	private:
-		int _error;
-
-	public:
-		_errno_exception(int error = errno): _error(error)
-		{
-		}
-
-		const char *what() const throw()
-		{
-			return strerror(_error); // Not thread-safe, but we're not multithreaded.
-		}
-
-		template<typename T> static T check(T result) // There's a few different int types in use here.
-		{
-			if(result < 0)
-				throw_exception();
-			return result;
-		}
-
-		template<typename T> static T *check(T *result)
-		{
-			if(!result)
-				throw_exception();
-			return result;
-		}
-
-		[[noreturn]] static void throw_exception(int error = errno);
-	};
-
-	[[noreturn]] void _errno_exception::throw_exception(int error)
-	{
-		throw _errno_exception(error);
-	}
-
-	class _malloc_ptr
-	{
-	private:
-		void *_ptr;
-
-	public:
-		static void *check(void *ptr)
-		{
-			return ptr;
-		}
-
-		template<typename Proc> _malloc_ptr(const Proc &proc) // It's my hot program I'll do what I want.
-		{
-#ifndef NDEBUG
-			_ptr = reinterpret_cast<void *>(0xbaadf00d);
-#endif
-			proc(_ptr);
-			assert(_ptr != reinterpret_cast<void *>(0xbaadf00d));
-		}
-
-		_malloc_ptr(): _ptr(nullptr)
-		{
-		}
-
-		~_malloc_ptr()
-		{
-			free(_ptr);
-		}
-
-		_malloc_ptr &operator =(_malloc_ptr &&ptr)
-		{
-			free(_ptr);
-			_ptr = ptr._ptr;
-			ptr._ptr = nullptr;
-			return *this;
-		}
-
-		template<typename T> T *get() const
-		{
-			static_assert(std::is_pod<T>::value, "_malloc_ptr can only contain POD types");
-			return static_cast<T *>(_ptr);
-		}
-
-		void resize(size_t new_size)
-		{
-			void *new_ptr = realloc(_ptr, new_size);
-			if(!new_ptr) // POSIX guarantees that errno is set, but C (and C++) does not.
-				_errno_exception::throw_exception(ENOMEM); // Could also use std::bad_alloc.
-			_ptr = new_ptr;
-		}
-	};
-
-	// Pointless optimization alert: std::vector<char> zeros out its memory; this doesn't.
-	class _malloc_vector
-	{
-	private:
-		_malloc_ptr _ptr;
-		size_t _size, _capacity;
-
-	public:
-		_malloc_vector(): _size(0), _capacity(0)
-		{
-		}
-
-		void *append0(size_t n)
-		{
-			size_t new_size = _size + n;
-			if(new_size > _capacity)
-			{
-				_capacity = std::max(_capacity * 2, new_size);
-				_ptr.resize(_capacity);
-			}
-			return _ptr.get<char>() + _size;
-		}
-
-		void append1(size_t n)
-		{
-			_size += n;
-			assert(_size <= _capacity);
-		}
-
-		size_t size() const
-		{
-			return _size;
-		}
-
-		size_t capacity() const
-		{
-			return _capacity;
-		}
-
-		template<typename T> T *data()
-		{
-			return _ptr.get<T>();
-		}
-	};
 
 	class _static_string_exception: public std::exception
 	{
@@ -487,7 +357,7 @@ void audit::_add_dependency(const char *begin, size_t size)
 
 void audit::_add_dependency(bfd *abfd, void *stream, pread_type pread, file_ptr offset)
 {
-	_malloc_vector path;
+	malloc_vector path;
 	size_t path_size = 0;
 	for(;;)
 	{
@@ -586,7 +456,7 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 					section->flags);
 				*/
 
-				_malloc_ptr section_data(
+				malloc_ptr section_data(
 					[&, section](void *&ptr)
 					{
 						_bfd::check(bfd_malloc_and_get_section(abfd, section, reinterpret_cast<bfd_byte **>(&ptr)));
@@ -721,14 +591,14 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 		// mentioned in Linux's ld.so man page, but that doesn't cover stuff like the /usr/lib/x86_64-linux-gnu path on
 		// Debian.
 		int pipefd[2];
-		_errno_exception::check(pipe(pipefd));
+		errno_exception::check(pipe(pipefd));
 		_file pipe_read(pipefd[0]);
 
 		pid_t child_pid;
 
 		{
 			_file pipe_write(pipefd[1]);
-			child_pid = _errno_exception::check(fork());
+			child_pid = errno_exception::check(fork());
 			if(!child_pid)
 			{
 				if(dup2(pipe_write, 1) >= 0)
@@ -739,14 +609,14 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 			}
 		} // Close pipe_write.
 
-		_malloc_vector ldd_output;
+		malloc_vector ldd_output;
 		for(;;)
 		{
 			size_t size = ldd_output.capacity() - ldd_output.size();
 			if(!size)
 				size = std::max(ldd_output.size(), size_t(8192));
 
-			size = _errno_exception::check(read(pipe_read, ldd_output.append0(size), size));
+			size = errno_exception::check(read(pipe_read, ldd_output.append0(size), size));
 
 			ldd_output.append1(size);
 			if(!size)
@@ -754,7 +624,7 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 		}
 
 		int status;
-		_errno_exception::check(waitpid(child_pid, &status, 0));
+		errno_exception::check(waitpid(child_pid, &status, 0));
 		if(!status)
 			_result = EXIT_FAILURE;
 
@@ -857,7 +727,7 @@ void audit::run(const char *path)
 {
 	try
 	{
-		_stdio_stream bin_strm(_errno_exception::check(fopen(path, "rb")));
+		_stdio_stream bin_strm(errno_exception::check(fopen(path, "rb")));
 #if HAVE_MACH_O_FAT_H
 		fat_header header;
 		// FAT_MAGIC (0xCAFEBABE) is the same magic number that Java uses for its .class files.
@@ -874,7 +744,7 @@ void audit::run(const char *path)
 			for(uint32_t i = 0; i != nfat_arch; ++i)
 			{
 				fat_arch arch;
-				_errno_exception::check(fseek(bin_strm.get(), sizeof(fat_header) + i * sizeof(fat_arch), SEEK_SET));
+				errno_exception::check(fseek(bin_strm.get(), sizeof(fat_header) + i * sizeof(fat_arch), SEEK_SET));
 				if(!bin_strm.check(fread(&arch, sizeof(arch), 1, bin_strm.get())))
 					_truncated();
 
@@ -913,7 +783,7 @@ void audit::run(const char *path)
 		rewind(bin_strm.get());
 		int error = errno;
 		if(error)
-			_errno_exception::throw_exception();
+			errno_exception::throw_exception();
 #endif
 		_bfd abfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
 		_do_bfd(abfd.get(), bin_strm.get(), _stdio_pread);
