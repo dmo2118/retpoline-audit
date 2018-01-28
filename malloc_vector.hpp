@@ -58,6 +58,11 @@ public:
 		return _ptr.get<T>();
 	}
 
+	malloc_ptr into_ptr() &&
+	{
+		return malloc_ptr(std::move(_ptr));
+	}
+
 	void shrink_to_fit()
 	{
 		_ptr.resize(_size);

@@ -290,6 +290,22 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 	}
 }
 
+size_t audit::_string::hash() const
+{
+	const size_t prime = sizeof(size_t) >= 8 ? 0x00000100000001B3 : 0x01000193;
+	const size_t offset_basis = sizeof(size_t) >= 8 ? 0xcbf29ce484222325 : 0x811c9dc5;
+
+	// FNV-1a.
+	size_t hash = offset_basis; // wheeeeeeee
+	for(unsigned i = 0; i != size; ++i)
+	{
+		// Good compilers should be able to optimize the multiplication here to shifts and adds when the CPU is lacking.
+		hash = (hash ^ begin.get<char>()[i]) * prime;
+	}
+
+	return hash;
+}
+
 void audit::_prefix(const char *text)
 {
 	_result = EXIT_FAILURE;
@@ -348,16 +364,16 @@ void audit::_pread(bfd *abfd, void *stream, pread_type pread, void *buf, file_pt
 		_truncated();
 }
 
-void audit::_add_dependency(const char *begin, size_t size)
+void audit::_add_dependency(_string &&path)
 {
-	std::pair<std::unordered_set<std::string>::iterator, bool> result = _pending.insert(std::string(begin, size));
+	std::pair<_pending_type::iterator, bool> result = _pending.insert(std::move(path));
 	if(result.second)
-		_todo.push_back(result.first->c_str());
+		_todo.push_back(result.first->begin.get<char>());
 }
 
-void audit::_add_dependency(const malloc_vector &path)
+void audit::_add_dependency(malloc_vector &&path)
 {
-	_add_dependency(path.data<char>(), path.size());
+	_add_dependency(_string(std::move(path)));
 }
 
 malloc_vector audit::_read_null_str(bfd *abfd, void *stream, pread_type pread, file_ptr offset)
@@ -706,7 +722,10 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 						}
 						else if(!vdso_name || strcmp(vdso_name, arrow))
 						{
-							_add_dependency(arrow, paren - arrow);
+							size_t size = paren - arrow;
+							malloc_ptr str(malloc_ptr::check(malloc(size + 1)));
+							*std::copy(arrow, paren, str.get<char>()) = 0;
+							_add_dependency(_string(std::move(str), size));
 						}
 					}
 				}

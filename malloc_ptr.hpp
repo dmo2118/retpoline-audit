@@ -18,6 +18,8 @@ private:
 public:
 	static void *check(void *ptr)
 	{
+		if(!ptr) // POSIX guarantees that errno is set, but C (and C++) does not.
+			errno_exception::throw_exception(ENOMEM); // Could also use std::bad_alloc.
 		return ptr;
 	}
 
@@ -35,7 +37,7 @@ public:
 		x._ptr = nullptr;
 	}
 
-	malloc_ptr(): _ptr(nullptr)
+	malloc_ptr(void *ptr = nullptr): _ptr(ptr)
 	{
 	}
 
@@ -54,16 +56,13 @@ public:
 
 	template<typename T> T *get() const
 	{
-		static_assert(std::is_pod<T>::value, "malloc_ptr can only contain POD types");
+		static_assert(std::is_pod<T>::value || std::is_same<T, void>::value, "malloc_ptr can only contain POD types");
 		return static_cast<T *>(_ptr);
 	}
 
 	void resize(size_t new_size)
 	{
-		void *new_ptr = std::realloc(_ptr, new_size);
-		if(!new_ptr) // POSIX guarantees that errno is set, but C (and C++) does not.
-			errno_exception::throw_exception(ENOMEM); // Could also use std::bad_alloc.
-		_ptr = new_ptr;
+		_ptr = check(std::realloc(_ptr, new_size));
 	}
 };
 

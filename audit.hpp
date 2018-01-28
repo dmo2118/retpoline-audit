@@ -22,7 +22,6 @@ using std::strchr;
 
 // bfd.h and dis-asm.h both bring in C headers, so there's a bunch of places where "std::" just isn't necessary.
 #include <cstdlib>
-#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -38,9 +37,40 @@ private:
 
 	int _result;
 
+	struct _string
+	{
+		size_t size;
+		malloc_ptr begin;
+
+		_string(malloc_vector &&v): size(v.size()), begin(std::move(v).into_ptr()) // Order is important.
+		{
+		}
+
+		_string(malloc_ptr &&_begin, size_t _size): size(_size), begin(std::move(_begin))
+		{
+		}
+
+		size_t hash() const;
+
+		bool operator ==(const _string &x) const
+		{
+			return size == x.size && !memcmp(begin.get<void>(), x.begin.get<void>(), size);
+		}
+	};
+
+	struct _hash_string
+	{
+	public:
+		size_t operator ()(const _string &s) const
+		{
+			return s.hash();
+		}
+	};
+
 	// A custom string_set class could combine a hash table node with string data in the same block of memory, saving one
 	// allocation per string. Or I could do things the easy way.
-	std::unordered_set<std::string> _pending;
+	typedef std::unordered_set<_string, _hash_string> _pending_type;
+	_pending_type _pending;
 	std::vector<const char *> _todo;
 
 	disassemble_info _dinfo;
@@ -63,8 +93,8 @@ private:
 		_pread(abfd, stream, pread, &buf, sizeof(T), offset);
 	}
 
-	void _add_dependency(const char *begin, size_t size);
-	void _add_dependency(const malloc_vector &path);
+	void _add_dependency(_string &&path);
+	void _add_dependency(malloc_vector &&path);
 	static malloc_vector _read_null_str(bfd *abfd, void *stream, pread_type pread, file_ptr offset);
 	void _do_bfd(bfd *abfd, void *stream, pread_type pread);
 
