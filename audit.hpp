@@ -69,9 +69,9 @@ private:
 
 	// A custom string_set class could combine a hash table node with string data in the same block of memory, saving one
 	// allocation per string. Or I could do things the easy way.
-	typedef std::unordered_set<_string, _hash_string> _pending_type;
-	_pending_type _pending;
-	std::vector<const char *> _todo;
+	typedef std::unordered_set<_string, _hash_string> _done_type;
+	_done_type _done;
+	std::unordered_set<const char *> _done_exe;
 
 	disassemble_info _dinfo;
 
@@ -96,7 +96,8 @@ private:
 	void _add_dependency(_string &&path);
 	void _add_dependency(malloc_vector &&path);
 	static malloc_vector _read_null_str(bfd *abfd, void *stream, pread_type pread, file_ptr offset);
-	void _do_bfd(bfd *abfd, void *stream, pread_type pread);
+	void _do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn);
+	void _run(const char *path, bool check_insn);
 
 public:
 	audit(unsigned long max_errors, bool recursive): _max_errors(max_errors), _recursive(recursive), _result(EXIT_SUCCESS)
@@ -105,8 +106,16 @@ public:
 		// init_disassemble_info(&dinfo, stderr, (fprintf_ftype)fprintf);
 	}
 
-	void run(const char *path);
-	int finish();
+	void run(const char *path)
+	{
+		_done_exe.clear();
+		_run(path, true);
+	}
+
+	int finish() const
+	{
+		return _result;
+	}
 };
 
 #endif

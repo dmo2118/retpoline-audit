@@ -366,9 +366,11 @@ void audit::_pread(bfd *abfd, void *stream, pread_type pread, void *buf, file_pt
 
 void audit::_add_dependency(_string &&path)
 {
-	std::pair<_pending_type::iterator, bool> result = _pending.insert(std::move(path));
-	if(result.second)
-		_todo.push_back(result.first->begin.get<char>());
+	std::pair<_done_type::iterator, bool> r0 = _done.insert(std::move(path));
+	std::pair<std::unordered_set<const char *>::iterator, bool> r1 = _done_exe.insert(r0.first->begin.get<char>());
+
+	if(r1.second)
+		_run(*r1.first, r0.second);
 }
 
 void audit::_add_dependency(malloc_vector &&path)
@@ -405,13 +407,12 @@ malloc_vector audit::_read_null_str(bfd *abfd, void *stream, pread_type pread, f
 	return path;
 }
 
-void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
+void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 {
 	const char *path = abfd->filename;
 
 	try
 	{
-		unsigned long error_count = 0;
 		const char *vdso_name = nullptr;
 
 		_bfd::check(bfd_check_format(abfd, bfd_object));
@@ -449,103 +450,108 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 			_unsupported_insn();
 		}
 
-		disassembler_ftype dis_asm = disassembler(
-#ifndef HAVE_DISASSEMBLER_ONE_ARG
-			_dinfo.arch,
-			_dinfo.endian == BFD_ENDIAN_BIG,
-			_dinfo.mach,
-#endif
-			abfd
-			);
-		assert(dis_asm);
-
-		// printf("flags: %x %d\n", abfd->flags, abfd->flags & EXEC_P);
-		// printf("start: %lx\n", abfd->start_address);
-
-		std::vector<const char *> bad_sections;
-
-		for(asection *section = abfd->sections; section != nullptr; section = section->next)
+		if(check_insn)
 		{
-			if(section->flags & SEC_CODE)
+			unsigned long error_count = 0;
+
+			disassembler_ftype dis_asm = disassembler(
+#ifndef HAVE_DISASSEMBLER_ONE_ARG
+				_dinfo.arch,
+				_dinfo.endian == BFD_ENDIAN_BIG,
+				_dinfo.mach,
+#endif
+				abfd
+				);
+			assert(dis_asm);
+
+			// printf("flags: %x %d\n", abfd->flags, abfd->flags & EXEC_P);
+			// printf("start: %lx\n", abfd->start_address);
+
+			std::vector<const char *> bad_sections;
+
+			for(asection *section = abfd->sections; section != nullptr; section = section->next)
 			{
-				/*
-				printf(
-					"section: %s @ %lx -> %lx (%lx) flags = %x\n",
-					section->name,
-					section->filepos,
-					section->vma,
-					section->size,
-					section->flags);
-				*/
-
-				malloc_ptr section_data(
-					[&, section](void *&ptr)
-					{
-						_bfd::check(bfd_malloc_and_get_section(abfd, section, reinterpret_cast<bfd_byte **>(&ptr)));
-					});
-
-				_dinfo.buffer = section_data.get<bfd_byte>();
-				_dinfo.buffer_vma = section->vma;
-				_dinfo.buffer_length = section->size;
-				_dinfo.section = section;
-
-				bfd_vma vma = section->vma;
-				bfd_vma vma_end = vma + section->size;
-				while(vma < vma_end)
+				if(section->flags & SEC_CODE)
 				{
-					int bytes = dis_asm(vma, &_dinfo);
-					if(bytes < 0)
-						break;
-					// printf("  %*s\n", (int)insn_str.size, insn_str.buf);
+					/*
+					printf(
+						"section: %s @ %lx -> %lx (%lx) flags = %x\n",
+						section->name,
+						section->filepos,
+						section->vma,
+						section->size,
+						section->flags);
+					*/
 
-					// TODO: ARM is probably LDR PC, (something) for indirect jumps.
-					if(_dinfo.arch == bfd_arch_i386)
+					malloc_ptr section_data(
+						[&, section](void *&ptr)
+						{
+							_bfd::check(bfd_malloc_and_get_section(abfd, section, reinterpret_cast<bfd_byte **>(&ptr)));
+						});
+
+					_dinfo.buffer = section_data.get<bfd_byte>();
+					_dinfo.buffer_vma = section->vma;
+					_dinfo.buffer_length = section->size;
+					_dinfo.section = section;
+
+					bfd_vma vma = section->vma;
+					bfd_vma vma_end = vma + section->size;
+					while(vma < vma_end)
 					{
-						bfd_byte *ptr = section_data.get<bfd_byte>() + (vma - section->vma);
+						int bytes = dis_asm(vma, &_dinfo);
+						if(bytes < 0)
+							break;
+						// printf("  %*s\n", (int)insn_str.size, insn_str.buf);
 
-						unsigned remaining = bytes;
-						// Prefixes: SEG=(CS|DS|ES|FS|GS|SS), operand/address size, LOCK, REP*, REX.* (only 64-bit)
-						while(
-							remaining &&
-							(*ptr == 0x26 || *ptr == 0x36 || *ptr == 0x2e || *ptr == 0x3e ||
-							 *ptr == 0x64 || *ptr == 0x65 || *ptr == 0x66 || *ptr == 0x67 ||
-							 *ptr == 0xf0 || *ptr == 0xf2 || *ptr == 0xf3 ||
-							((_dinfo.mach & (bfd_mach_x86_64 | bfd_mach_x64_32)) && ((*ptr & 0xf0) == 0x40))))
+						// TODO: ARM is probably LDR PC, (something) for indirect jumps.
+						if(_dinfo.arch == bfd_arch_i386)
 						{
-							++ptr;
-							--remaining;
-						}
+							bfd_byte *ptr = section_data.get<bfd_byte>() + (vma - section->vma);
 
-						if(remaining >= 2 && ptr[0] == 0xff)
-						{
-							bfd_byte modrm543 = ptr[1] & 0x38;
-							if(modrm543 == 0x10 || modrm543 == 0x18 || modrm543 == 0x20 || modrm543 == 0x28)
+							unsigned remaining = bytes;
+							// Prefixes: SEG=(CS|DS|ES|FS|GS|SS), operand/address size, LOCK, REP*, REX.* (only 64-bit)
+							while(
+								remaining &&
+								(*ptr == 0x26 || *ptr == 0x36 || *ptr == 0x2e || *ptr == 0x3e ||
+								 *ptr == 0x64 || *ptr == 0x65 || *ptr == 0x66 || *ptr == 0x67 ||
+								 *ptr == 0xf0 || *ptr == 0xf2 || *ptr == 0xf3 ||
+								((_dinfo.mach & (bfd_mach_x86_64 | bfd_mach_x64_32)) && ((*ptr & 0xf0) == 0x40))))
 							{
-								if(!_found_indirect(path, section, vma, error_count, bad_sections))
-									break;
+								++ptr;
+								--remaining;
+							}
+
+							if(remaining >= 2 && ptr[0] == 0xff)
+							{
+								bfd_byte modrm543 = ptr[1] & 0x38;
+								if(modrm543 == 0x10 || modrm543 == 0x18 || modrm543 == 0x20 || modrm543 == 0x28)
+								{
+									if(!_found_indirect(path, section, vma, error_count, bad_sections))
+										break;
+								}
 							}
 						}
-					}
 
-					vma += bytes;
+						vma += bytes;
+					}
 				}
 			}
-		}
 
-		if(error_count)
-		{
-			if(_max_errors > 1 && error_count > _max_errors)
-				_error(path, "additional indirect branches suppressed");
-
-			// Do this before closing the BFD.
-			_prefix(path);
-			fputs("indirect branch(es) found in sections:", stderr);
-			for(const char *section_name: bad_sections)
+			if(error_count)
 			{
-				fputc(' ', stderr);
-				fputs(section_name, stderr);
+				if(_max_errors > 1 && error_count > _max_errors)
+					_error(path, "additional indirect branches suppressed");
+
+				// Do this before closing the BFD.
+				_prefix(path);
+				fputs("indirect branch(es) found in sections:", stderr);
+				for(const char *section_name: bad_sections)
+				{
+					fputc(' ', stderr);
+					fputs(section_name, stderr);
+				}
+				fputc('\n', stderr);
 			}
-			fputc('\n', stderr);
 		}
 
 		if(!_recursive)
@@ -612,6 +618,7 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 		// Using ldd(1) to find dependencies. The second-best alternative is probably to run through the search order
 		// mentioned in Linux's ld.so man page, but that doesn't cover stuff like the /usr/lib/x86_64-linux-gnu path on
 		// Debian.
+		// TODO: ldd(1) is itself recursive; don't call it for every binary.
 		int pipefd[2];
 		errno_exception::check(pipe(pipefd));
 		_file pipe_read(pipefd[0]);
@@ -748,7 +755,7 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread)
 	}
 }
 
-void audit::run(const char *path)
+void audit::_run(const char *path, bool check_insn) // TODO: This and _add_dependency could use some cleanup.
 {
 	try
 	{
@@ -799,7 +806,7 @@ void audit::run(const char *path)
 							_stdio_subset::pread,
 							_stdio_subset::close,
 							_stdio_subset::stat)));
-				_do_bfd(abfd.get(), &subset, _stdio_subset::pread);
+				_do_bfd(abfd.get(), &subset, _stdio_subset::pread, check_insn);
 			}
 			return;
 		}
@@ -811,22 +818,10 @@ void audit::run(const char *path)
 			errno_exception::throw_exception();
 #endif
 		_bfd abfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
-		_do_bfd(abfd.get(), bin_strm.get(), _stdio_pread);
+		_do_bfd(abfd.get(), bin_strm.get(), _stdio_pread, check_insn);
 	}
 	catch(const std::exception &exc)
 	{
 		_error(path, exc.what());
 	}
-}
-
-int audit::finish()
-{
-	while(!_todo.empty())
-	{
-		const char *path = _todo.back();
-		_todo.pop_back();
-		run(path);
-	}
-
-	return _result;
 }
