@@ -5,7 +5,6 @@
 
 #include "errno_exception.hpp"
 #include "malloc_ptr.hpp"
-#include "malloc_vector.hpp"
 
 #include <cassert>
 #include <cerrno>
@@ -15,9 +14,6 @@
 
 #if HAVE_MACH_O_FAT_H
 #	include <mach-o/fat.h>
-#endif
-#if HAVE_MACH_O_LOADER_H
-#	include <mach-o/loader.h>
 #endif
 
 namespace // Lots of little functions and classes, too small to warrant their own header files.
@@ -47,17 +43,17 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 #endif
 	}
 
+	inline std::int32_t _byte_swap(std::int32_t x)
+	{
+		return _byte_swap(std::uint32_t(x));
+	}
+
 #if HAVE_MACH_O_LOADER_H
 	std::uint32_t _no_swap(std::uint32_t x)
 	{
 		return x;
 	}
 #endif
-
-	inline std::int32_t _byte_swap(std::int32_t x)
-	{
-		return _byte_swap(std::uint32_t(x));
-	}
 
 	template<typename T> inline T _big_endian(T x)
 	{
@@ -284,10 +280,27 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		return result;
 	}
 
-	[[noreturn]] void _truncated()
+	inline bool _cmp_prefix(const char *s, size_t n, const char *prefix)
 	{
-		_bfd::throw_exception(bfd_error_file_truncated);
+		size_t prefix_size = strlen(prefix);
+		return n >= prefix_size && !memcmp(s, prefix, prefix_size);
 	}
+}
+
+audit::_string audit::_expand_dyld_vars(
+	const char *prefix,
+	size_t prefix_size,
+	const char *suffix,
+	size_t suffix_kill,
+	size_t suffix_size)
+{
+	size_t size = prefix_size + suffix_size - suffix_kill;
+	malloc_ptr result(malloc_ptr::check(malloc(size + 1)));
+	*std::copy(
+		suffix + suffix_kill,
+		suffix + suffix_size,
+		std::copy(prefix, prefix + prefix_size, result.get<char>())) = 0;
+	return _string(std::move(result), size);
 }
 
 size_t audit::_string::hash() const
@@ -304,6 +317,11 @@ size_t audit::_string::hash() const
 	}
 
 	return hash;
+}
+
+[[noreturn]] void audit::_truncated()
+{
+	_bfd::throw_exception(bfd_error_file_truncated);
 }
 
 void audit::_prefix(const char *text)
@@ -403,7 +421,9 @@ malloc_vector audit::_read_null_str(bfd *abfd, void *stream, pread_type pread, f
 		offset += append_size;
 	}
 
+	path.append1(1); // The null-terminator is explicitly included in the result.
 	path.shrink_to_fit();
+	assert(!path.data<char>()[path.size() - 1]);
 	return path;
 }
 
@@ -585,7 +605,16 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 				load_command base;
 				dylinker_command dylinker;
 				dylib_command dylib;
+				rpath_command rpath;
 			} lc;
+
+			std::vector<_string> rpaths;
+			std::vector<_string> deps;
+			deps.reserve(header.ncmds);
+
+			// loader_path and executable_path require slashes on the end unless they are empty.
+			const char *loader_path_end = strrchr(abfd->filename, '/');
+			size_t loader_path_size = loader_path_end ? loader_path_end - abfd->filename + 1 : 0;
 
 			for(uint32_t i = read32(header.ncmds); i; --i)
 			{
@@ -593,20 +622,73 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 				switch(read32(lc.base.cmd))
 				{
 				case LC_LOAD_DYLINKER:
-					if(lc.base.cmdsize < sizeof(lc.dylinker))
-						_truncated(); // TODO: Probably needs a better message. (bfd_error_malformed_archive?)
-					_pread(abfd, stream, pread, lc.dylinker, offset);
-					_add_dependency(_read_null_str(abfd, stream, pread, offset + read32(lc.dylinker.name.offset)));
+					_read_lc(abfd, stream, pread, lc.dylinker, offset);
+					deps.emplace_back(_read_null_str(abfd, stream, pread, offset + read32(lc.dylinker.name.offset)));
 					break;
+
 				case LC_LOAD_DYLIB:
-					if(lc.base.cmdsize < sizeof(lc.dylib))
-						_truncated();
-					_pread(abfd, stream, pread, lc.dylib, offset);
-					_add_dependency(_read_null_str(abfd, stream, pread, offset + read32(lc.dylib.dylib.name.offset)));
+					_read_lc(abfd, stream, pread, lc.dylib, offset);
+					deps.emplace_back(_read_null_str(abfd, stream, pread, offset + read32(lc.dylib.dylib.name.offset)));
 					break;
+
+				case LC_RPATH:
+					_read_lc(abfd, stream, pread, lc.rpath, offset);
+					{
+						_string rpath = _read_null_str(abfd, stream, pread, offset + read32(lc.rpath.path.offset));
+
+						if(_cmp_prefix(rpath.begin.get<char>(), rpath.size, "@executable_path/"))
+						{
+							rpath = _expand_dyld_vars(
+								_executable_path,
+								_executable_path_size,
+								rpath.begin.get<char>(),
+								strlen("@executable_path/"),
+								rpath.size);
+						}
+						else if(_cmp_prefix(rpath.begin.get<char>(), rpath.size, "@loader_path/"))
+						{
+							rpath = _expand_dyld_vars(
+								abfd->filename,
+								loader_path_size,
+								rpath.begin.get<char>(),
+								strlen("@loader_path/"),
+								rpath.size);
+						}
+						rpaths.push_back(std::move(rpath));
+						break;
+					}
+				// TODO: LC_REEXPORT_DYLIB, maybe LC_LAZY_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB
 				}
 
 				offset += lc.base.cmdsize;
+			}
+
+			for(auto &dep: deps)
+			{
+				const char *p = dep.begin.get<char>();
+				size_t s = dep.size;
+				if(_cmp_prefix(p, s, "@rpath/"))
+				{
+					for(auto rpath = rpaths.cbegin();; ++rpath)
+					{
+						if(rpath == rpaths.cend())
+						{
+							_errorf(path, "%*s: %s", s, p, strerror(ENOENT));
+							break;
+						}
+
+						_string name(_expand_dyld_vars(rpath->begin.get<char>(), rpath->size, p, strlen("@rpath/") - 1, s));
+						if(!access(name.begin.get<char>(), F_OK))
+						{
+							_add_dependency(std::move(name));
+							break;
+						}
+					}
+				}
+				else
+				{
+					_add_dependency(std::move(dep));
+				}
 			}
 
 			return;
@@ -824,4 +906,14 @@ void audit::_run(const char *path, bool check_insn) // TODO: This and _add_depen
 	{
 		_error(path, exc.what());
 	}
+}
+
+void audit::run(const char *path)
+{
+	_executable_path = path;
+	const char *executable_path_end = strrchr(path, '/'); // Will need to change for PE, obviously.
+	_executable_path_size = executable_path_end ? executable_path_end - _executable_path + 1 : 0;
+
+	_done_exe.clear();
+	_run(path, true);
 }

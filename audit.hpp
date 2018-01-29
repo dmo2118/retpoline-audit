@@ -27,27 +27,33 @@ using std::strchr;
 
 #include "config.h" // Bring in the real PACKAGE/PACKAGE_VERSION.
 
+#if HAVE_MACH_O_LOADER_H
+#       include <mach-o/loader.h>
+#endif
+
 class audit
 {
 private:
 	typedef file_ptr (*pread_type)(bfd *, void *, void *, file_ptr, file_ptr);
-
-	unsigned long _max_errors;
-	bool _recursive;
-
-	int _result;
 
 	struct _string
 	{
 		size_t size;
 		malloc_ptr begin;
 
-		_string(malloc_vector &&v): size(v.size()), begin(std::move(v).into_ptr()) // Order is important.
+		void validate()
 		{
+			assert(!begin.get<char>()[size]);
+		}
+
+		_string(malloc_vector &&v): size(v.size() - 1), begin(std::move(v).into_ptr()) // Order is important.
+		{
+			validate();
 		}
 
 		_string(malloc_ptr &&_begin, size_t _size): size(_size), begin(std::move(_begin))
 		{
+			validate();
 		}
 
 		size_t hash() const;
@@ -67,6 +73,11 @@ private:
 		}
 	};
 
+	unsigned long _max_errors;
+	bool _recursive;
+
+	int _result;
+
 	// A custom string_set class could combine a hash table node with string data in the same block of memory, saving one
 	// allocation per string. Or I could do things the easy way.
 	typedef std::unordered_set<_string, _hash_string> _done_type;
@@ -74,6 +85,11 @@ private:
 	std::unordered_set<const char *> _done_exe;
 
 	disassemble_info _dinfo;
+
+	const char *_executable_path;
+	size_t _executable_path_size;
+
+	[[noreturn]] static void _truncated();
 
 	void _prefix(const char *text);
 	void _error(const char *prefix, const char *message);
@@ -93,6 +109,29 @@ private:
 		_pread(abfd, stream, pread, &buf, sizeof(T), offset);
 	}
 
+#if HAVE_MACH_O_LOADER_H
+	template<typename LC> static void _read_lc(bfd *abfd, void *stream, pread_type pread, LC &lc, file_ptr offset)
+	{
+		static_assert(
+			sizeof(lc) >= sizeof(load_command) &&
+				offsetof(load_command, cmd) == offsetof(LC, cmd) &&
+				offsetof(load_command, cmdsize) == offsetof(LC, cmdsize),
+			"LC not a load command.");
+
+		if(lc.cmdsize < sizeof(lc))
+			_truncated(); // TODO: Probably needs a better message. (bfd_error_malformed_archive?)
+
+		_pread(abfd, stream, pread, lc, offset);
+	}
+#endif
+
+	static _string _expand_dyld_vars(
+		const char *prefix,
+		size_t prefix_size,
+		const char *suffix,
+		size_t suffix_kill,
+		size_t suffix_size);
+
 	void _add_dependency(_string &&path);
 	void _add_dependency(malloc_vector &&path);
 	static malloc_vector _read_null_str(bfd *abfd, void *stream, pread_type pread, file_ptr offset);
@@ -106,11 +145,7 @@ public:
 		// init_disassemble_info(&dinfo, stderr, (fprintf_ftype)fprintf);
 	}
 
-	void run(const char *path)
-	{
-		_done_exe.clear();
-		_run(path, true);
-	}
+	void run(const char *path);
 
 	int finish() const
 	{

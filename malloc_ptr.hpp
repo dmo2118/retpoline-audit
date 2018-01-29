@@ -48,9 +48,7 @@ public:
 
 	malloc_ptr &operator =(malloc_ptr &&ptr)
 	{
-		free(_ptr);
-		_ptr = ptr._ptr;
-		ptr._ptr = nullptr;
+		std::swap(_ptr, ptr._ptr);
 		return *this;
 	}
 
