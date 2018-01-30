@@ -200,6 +200,16 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		throw _static_string_exception("unsupported instruction set");
 	}
 
+	void *_bfd_no_open(bfd *nbfd, void *open_closure)
+	{
+		return open_closure;
+	}
+
+	int _bfd_no_close(bfd *nbfd, void *stream)
+	{
+		return 0;
+	}
+
 #if HAVE_MACH_O_FAT_H
 	struct _stdio_subset
 	{
@@ -207,16 +217,9 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		file_ptr begin;
 		file_ptr size;
 
-		static void *open(bfd *nbfd, void *open_closure);
 		static file_ptr pread(bfd *nbfd, void *stream, void *buf, file_ptr nbytes, file_ptr offset);
-		static int close(bfd *nbfd, void *stream);
 		static int stat(bfd *nbfd, void *stream, struct stat *sb);
 	};
-
-	void *_stdio_subset::open(bfd *nbfd, void *open_closure)
-	{
-		return open_closure;
-	}
 
 	file_ptr _stdio_subset::pread(bfd *nbfd, void *stream, void *buf, file_ptr nbytes, file_ptr offset)
 	{
@@ -242,11 +245,6 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		}
 
 		return result;
-	}
-
-	int _stdio_subset::close(bfd *nbfd, void *stream)
-	{
-		return 0;
 	}
 
 	int _stdio_subset::stat(bfd *nbfd, void *stream, struct stat *sb)
@@ -279,6 +277,12 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 		}
 
 		return result;
+	}
+
+	int _stdio_stat(bfd *nbfd, void *stream_raw, struct stat *sb)
+	{
+		FILE *stream = static_cast<FILE *>(stream_raw);
+		return fstat(fileno(stream), sb);
 	}
 
 	inline bool _cmp_prefix(const char *s, size_t n, const char *prefix)
@@ -902,11 +906,11 @@ void audit::_run(const char *path, bool check_insn) // TODO: This and _add_depen
 					_bfd::check(
 						bfd_openr_iovec(
 							path_with_suffix.get(),
-							NULL,
-							_stdio_subset::open,
+							nullptr,
+							_bfd_no_open,
 							&subset,
 							_stdio_subset::pread,
-							_stdio_subset::close,
+							_bfd_no_close,
 							_stdio_subset::stat)));
 				_do_bfd(abfd.get(), &subset, _stdio_subset::pread, check_insn);
 			}
@@ -919,7 +923,14 @@ void audit::_run(const char *path, bool check_insn) // TODO: This and _add_depen
 		if(error)
 			errno_exception::throw_exception();
 #endif
-		_bfd abfd(_bfd::check(bfd_openstreamr(path, nullptr, bin_strm.get())));
+		_bfd abfd(_bfd::check(bfd_openr_iovec(
+			path,
+			nullptr,
+			_bfd_no_open,
+			bin_strm.get(),
+			_stdio_pread,
+			_bfd_no_close,
+			_stdio_stat)));
 		_do_bfd(abfd.get(), bin_strm.get(), _stdio_pread, check_insn);
 	}
 	catch(const std::exception &exc)
