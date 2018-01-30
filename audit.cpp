@@ -95,6 +95,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 
 		~_stdio_stream()
 		{
+			fclose(_stream);
 		}
 
 		FILE *get() const
@@ -287,7 +288,7 @@ namespace // Lots of little functions and classes, too small to warrant their ow
 	}
 }
 
-audit::_string audit::_expand_dyld_vars(
+audit::_string audit::_expand_dyld_var(
 	const char *prefix,
 	size_t prefix_size,
 	const char *suffix,
@@ -301,6 +302,28 @@ audit::_string audit::_expand_dyld_vars(
 		suffix + suffix_size,
 		std::copy(prefix, prefix + prefix_size, result.get<char>())) = 0;
 	return _string(std::move(result), size);
+}
+
+void audit::_expand_dyld_vars(_string &path, const char *loader_path, size_t loader_path_size) const
+{
+	if(_cmp_prefix(path.begin.get<char>(), path.size, "@executable_path/"))
+	{
+		path = _expand_dyld_var(
+			_executable_path,
+			_executable_path_size,
+			path.begin.get<char>(),
+			strlen("@executable_path/"),
+			path.size);
+	}
+	else if(_cmp_prefix(path.begin.get<char>(), path.size, "@loader_path/"))
+	{
+		path = _expand_dyld_var(
+			loader_path,
+			loader_path_size,
+			path.begin.get<char>(),
+			strlen("@loader_path/"),
+			path.size);
+	}
 }
 
 size_t audit::_string::hash() const
@@ -600,6 +623,13 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 			// TODO: Make sure header.sizeofcmds matches offset at the end of this.
 			// uint32_t sizeofcmds = read32(header.sizeofcmds);
 
+			// TODO: An error: /Applications/Xcode.app/Contents/MacOS/../Frameworks/IDEKit.framework/Versions/A/IDEKit:
+			// @rpath/XCTest.framework/Versions/A/XCTest: No such file or directory
+			// dyld(1) sez: RPATH successful expansion of @rpath/XCTest.framework/Versions/A/XCTest to:
+			// /Applications/Xcode.app/Contents/SharedFrameworks/DVTKit.framework/Versions/A/../../../../Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks//XCTest.framework/Versions/A/XCTest
+			// Not sure where it's pulling that MacOSX.platform path from.
+			// Also from Xcode: Note /System/Library/PrivateFrameworks/LoggingSupport.framework/Versions/A/LoggingSupport.
+
 			union
 			{
 				load_command base;
@@ -608,7 +638,7 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 				rpath_command rpath;
 			} lc;
 
-			std::vector<_string> rpaths;
+			size_t rpaths_size = _rpaths.size();
 			std::vector<_string> deps;
 			deps.reserve(header.ncmds);
 
@@ -627,6 +657,10 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 					break;
 
 				case LC_LOAD_DYLIB:
+				case LC_LOAD_WEAK_DYLIB: // TODO: If this is a no such file, should retpoline-audit(1) really error out?
+				case LC_REEXPORT_DYLIB:
+				case LC_LAZY_LOAD_DYLIB: // TODO: Likewise with no such file.
+				case LC_LOAD_UPWARD_DYLIB:
 					_read_lc(abfd, stream, pread, lc.dylib, offset);
 					deps.emplace_back(_read_null_str(abfd, stream, pread, offset + read32(lc.dylib.dylib.name.offset)));
 					break;
@@ -635,33 +669,16 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 					_read_lc(abfd, stream, pread, lc.rpath, offset);
 					{
 						_string rpath = _read_null_str(abfd, stream, pread, offset + read32(lc.rpath.path.offset));
-
-						if(_cmp_prefix(rpath.begin.get<char>(), rpath.size, "@executable_path/"))
-						{
-							rpath = _expand_dyld_vars(
-								_executable_path,
-								_executable_path_size,
-								rpath.begin.get<char>(),
-								strlen("@executable_path/"),
-								rpath.size);
-						}
-						else if(_cmp_prefix(rpath.begin.get<char>(), rpath.size, "@loader_path/"))
-						{
-							rpath = _expand_dyld_vars(
-								abfd->filename,
-								loader_path_size,
-								rpath.begin.get<char>(),
-								strlen("@loader_path/"),
-								rpath.size);
-						}
-						rpaths.push_back(std::move(rpath));
-						break;
+						_expand_dyld_vars(rpath, abfd->filename, loader_path_size);
+						_rpaths.push_back(std::move(rpath));
 					}
-				// TODO: LC_REEXPORT_DYLIB, maybe LC_LAZY_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB
+					break;
 				}
 
 				offset += lc.base.cmdsize;
 			}
+
+			std::reverse(_rpaths.begin() + _rpaths.size(), _rpaths.end());
 
 			for(auto &dep: deps)
 			{
@@ -669,15 +686,15 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 				size_t s = dep.size;
 				if(_cmp_prefix(p, s, "@rpath/"))
 				{
-					for(auto rpath = rpaths.cbegin();; ++rpath)
+					for(auto rpath = _rpaths.crbegin();; ++rpath)
 					{
-						if(rpath == rpaths.cend())
+						if(rpath == _rpaths.crend())
 						{
 							_errorf(path, "%*s: %s", s, p, strerror(ENOENT));
 							break;
 						}
 
-						_string name(_expand_dyld_vars(rpath->begin.get<char>(), rpath->size, p, strlen("@rpath/") - 1, s));
+						_string name(_expand_dyld_var(rpath->begin.get<char>(), rpath->size, p, strlen("@rpath/") - 1, s));
 						if(!access(name.begin.get<char>(), F_OK))
 						{
 							_add_dependency(std::move(name));
@@ -685,11 +702,14 @@ void audit::_do_bfd(bfd *abfd, void *stream, pread_type pread, bool check_insn)
 						}
 					}
 				}
-				else
+				else // TODO: loader_path, executable_path
 				{
+					_expand_dyld_vars(dep, abfd->filename, loader_path_size);
 					_add_dependency(std::move(dep));
 				}
 			}
+
+			_rpaths.erase(_rpaths.begin() + rpaths_size, _rpaths.end()); // Can't use vector<>::resize, natch.
 
 			return;
 		}

@@ -86,6 +86,8 @@ private:
 
 	disassemble_info _dinfo;
 
+	std::vector<_string> _rpaths;
+
 	const char *_executable_path;
 	size_t _executable_path_size;
 
@@ -125,12 +127,13 @@ private:
 	}
 #endif
 
-	static _string _expand_dyld_vars(
+	static _string _expand_dyld_var(
 		const char *prefix,
 		size_t prefix_size,
 		const char *suffix,
 		size_t suffix_kill,
 		size_t suffix_size);
+	void _expand_dyld_vars(_string &path, const char *loader_path, size_t loader_path_size) const;
 
 	void _add_dependency(_string &&path);
 	void _add_dependency(malloc_vector &&path);
