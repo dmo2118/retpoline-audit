@@ -10,8 +10,9 @@ This is currently known to compile on and work with userspace binaries for the f
 
 * GNU/Linux (`i386`, `x86_64`)
 * macOS (Intel)
+* Windows, via [Cygwin](https://www.cygwin.com/) (`x86_64`); non-Cygwin binaries can be checked.
 
-Other systems may also work, but don't count on it.
+Other systems may also work.
 
 At this time (January 2018), very few executables in the wild have been compiled with retpoline support, and compiler support is
 still in the process of trickling down to end users. For now, running this program on random binaries will show indirect
@@ -23,8 +24,12 @@ Security
 --------
 
 Do not run `retpoline-audit` on untrusted executables, or executables which link with untrusted shared objects.
-`retpoline-audit` uses [ldd(1)](http://man7.org/linux/man-pages/man1/ldd.1.html) to find dependencies, which "may lead to the
-execution of whatever code is defined in the program's ELF interpreter, and perhaps to execution of the program itself."
+
+`retpoline-audit` can use [ldd(1)](http://man7.org/linux/man-pages/man1/ldd.1.html) to find dependencies. On Linux, this "may
+lead to the execution of whatever code is defined in the program's ELF interpreter, and perhaps to execution of the program
+itself." Cygwin has a similar warning.
+
+`retpoline-audit` does not verify that macOS (Mach-O) executables are well-formed at this time.
 
 Other issues
 ------------
@@ -47,6 +52,7 @@ In addition:
 * Fat binaries on macOS always have all slices checked. Dependency chains can differ for different architectures, and
   `retpoline-audit` may bring in binaries that a slice normally wouldn't load.
 * macOS: Some sections show up with slightly different names, e.g. `__TEXT.__text` shows up as just `.text`.
+* Windows: 32-bit executables cannot be checked properly from 64-bit Cygwin due to a deficiency in ldd(1).
 
 Building
 --------

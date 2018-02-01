@@ -33,6 +33,7 @@ int main(int argc, char **argv)
 
 		case 'n':
 			char *end;
+			assert(optarg);
 			max_errors = strtoul(optarg, &end, 0);
 			if(*end)
 			{

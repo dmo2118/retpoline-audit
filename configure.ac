@@ -15,7 +15,13 @@ AX_CXXFLAGS_WARN_ALL
 # (C++11, binutils libs), without which retpoline-audit won't build. These will not be checked for; failure happens during make.
 
 # Checks for libraries.
-AC_CHECK_LIB(intl, libintl_dgettext) # libbfd needs this on macOS.
+if test "$(uname -o 2>/dev/null || uname -s)" = Cygwin
+then
+	AC_CHECK_LIB(iberty, xmalloc) # BFD needs this on Cygwin.
+	AC_CHECK_LIB(cygwin, getopt) # Order is important: libiberty coming first screws up Cygwin's getopt.
+fi
+AC_CHECK_LIB(intl, libintl_dgettext) # BFD needs this on macOS.
+AC_CHECK_LIB(z, deflate) # BFD needs this on Cygwin.
 
 # Checks for header files.
 AC_CHECK_HEADERS(mach-o/fat.h)
